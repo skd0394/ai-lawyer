@@ -21,3 +21,9 @@ ROUTES = {
 
 
 **ls -la ~/ai-lawyer/deploy.sh**
+
+
+The harness comparison table in your own words — LangGraph, OpenAI Agents SDK, smolagents, Pydantic AI, LiteLLM, custom loop — and why custom.
+Model routing: claude-sonnet-5 for the loop, claude-haiku-4-5-20251001 for auxiliary work, verified from the live models endpoint.
+The two contradictory eviction answers from T1.3. 30 days vs 5 days, same jurisdiction, neither cited. That's your empirical justification for the research-and-cite pipeline, and it's far more persuasive than quoting the spec back at them.
+Today's measurements: cold vs warm sandbox acquire_ms, and the 2,142-vs-822 token observation.

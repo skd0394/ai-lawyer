@@ -253,6 +253,131 @@ def fastapi_app():
             "env_dump": blob,          # read it yourself; trust nothing
         }
 
+    # ── T1.6 — the first agent loop ───────────────────────────────────────
+    # An LLM alone can only talk. An LLM in a loop with tools can act.
+    # Note the split: this loop runs HERE, in the API process, which holds
+    # the key. The tools run in the SANDBOX, which does not. That is the
+    # architecture for the rest of the project.
+
+    AGENT_TOOLS = [
+        {
+            "name": "list_files",
+            # Descriptions are documentation for the model. They are also
+            # re-sent on EVERY iteration, so every word costs you N times.
+            # Terse and precise, always.
+            "description": "List the user's uploaded files.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "read_file",
+            "description": "Read one uploaded file. Call list_files first.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"name": {"type": "string",
+                                        "description": "filename only, no path"}},
+                "required": ["name"],
+            },
+        },
+    ]
+
+    def run_agent_tool(sb, name: str, args: dict) -> str:
+        """Dispatch. NEVER raises — a tool error is information the model
+        can act on. An exception here would kill the whole turn."""
+        import shlex
+        try:
+            if name == "list_files":
+                return sh(sb, "ls -1 /data/uploads")["stdout"].strip() or "(no files)"
+            if name == "read_file":
+                fn = args.get("name", "")
+                # Path safety enforced in CODE, not in the prompt. A prompt
+                # can be argued with; a string check cannot. Day 3 hardens
+                # this into a proper realpath allowlist.
+                if not fn or "/" in fn or ".." in fn:
+                    return "ERROR: filename only, no paths"
+                out = sh(sb, f"cat /data/uploads/{shlex.quote(fn)}")
+                return out["stdout"] or f"ERROR: {out['stderr'].strip()}"
+            return f"ERROR: no tool named {name}"
+        except Exception as e:
+            return f"ERROR: {type(e).__name__}: {e}"
+
+    class AgentRequest(BaseModel):
+        prompt: str = "What files do I have, and what is in them?"
+        user_id: str = "kartik"
+        model: str = "claude-haiku-4-5-20251001"
+        max_iterations: int = 6
+
+    @web_app.post("/api/debug/agent")
+    def debug_agent(req: AgentRequest):
+        sb, _ = get_or_create_sandbox(req.user_id)
+
+        # Seed a sample file so there is something to read.
+        sh(sb, "mkdir -p /data/uploads && [ -f /data/uploads/notice.txt ] || "
+               "cat > /data/uploads/notice.txt << 'EOF'\n"
+               "FIVE DAY NOTICE\n\n"
+               "To: Tenant, 400 W Madison St, Chicago IL\n"
+               "You are hereby notified that rent of $4,200 is past due.\n"
+               "Payment must be made within five days of service of this notice.\n"
+               "EOF")
+
+        messages = [{"role": "user", "content": req.prompt}]
+        iterations, final_text = [], ""
+        t0 = time.perf_counter()
+
+        for n in range(1, req.max_iterations + 1):
+            try:
+                r = client.messages.create(
+                    model=req.model,
+                    max_tokens=1024,
+                    tools=AGENT_TOOLS,      # re-sent every single iteration
+                    messages=messages,
+                )
+            except Exception as e:
+                raise HTTPException(502, f"iteration {n}: {type(e).__name__}: {e}")
+
+            calls = [b for b in r.content if b.type == "tool_use"]
+            iterations.append({
+                "n": n,
+                "input_tokens": r.usage.input_tokens,
+                "output_tokens": r.usage.output_tokens,
+                "stop_reason": r.stop_reason,
+                "tool_calls": [c.name for c in calls],
+            })
+
+            messages.append({"role": "assistant", "content": r.content})
+
+            if not calls:
+                final_text = "".join(b.text for b in r.content if b.type == "text")
+                break
+
+            results = []
+            for c in calls:
+                out = run_agent_tool(sb, c.name, c.input)
+                results.append({
+                    "type": "tool_result",
+                    "tool_use_id": c.id,
+                    # Cap tool output. Uncapped results are how a 200-page
+                    # PDF ends up costing you 6x its size in an agent loop.
+                    "content": out[:4000],
+                })
+            messages.append({"role": "user", "content": results})
+        else:
+            final_text = "(hit max_iterations without finishing)"
+
+        billed_in = sum(i["input_tokens"] for i in iterations)
+        return {
+            "final_text": final_text,
+            "iterations": iterations,
+            "totals": {
+                # ⭐ THE NUMBER. Compare it to the LAST iteration's
+                #    input_tokens. The gap is what re-sending history costs.
+                "billed_input_tokens": billed_in,
+                "billed_output_tokens": sum(i["output_tokens"] for i in iterations),
+                "final_context_tokens": iterations[-1]["input_tokens"],
+                "iterations_used": len(iterations),
+                "latency_ms": int((time.perf_counter() - t0) * 1000),
+            },
+        }
+
     @web_app.delete("/api/debug/sandbox")
     def kill_sandbox(user_id: str = "kartik"):
         """Terminate on demand. Use this when you walk away — it is their

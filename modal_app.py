@@ -30,6 +30,11 @@ api_image = (
         "anthropic==0.120.0",
         "httpx",
     )
+    # Ships your local harness/ package into the image. Must come AFTER
+    # pip_install — Modal requires local layers last. Without this you get
+    # ModuleNotFoundError: no module named 'harness' at runtime, because
+    # Modal only auto-mounts the entrypoint file, not your packages.
+    .add_local_python_source("harness")
 )
 
 sandbox_image = (
@@ -270,11 +275,18 @@ def fastapi_app():
         },
         {
             "name": "read_file",
-            "description": "Read one uploaded file. Call list_files first.",
+            # TRIMMED version. Every behavioural constraint kept, the
+            # redundant restatements removed. Safety is enforced in _read()
+            # by a code check — this prose only prevents wasted iterations.
+            "description": (
+                "Read one uploaded file. Call list_files first \u2014 the name must be "
+                "an exact filename from that list, with no directory path."
+            ),
             "input_schema": {
                 "type": "object",
-                "properties": {"name": {"type": "string",
-                                        "description": "filename only, no path"}},
+                "properties": {
+                    "name": {"type": "string", "description": "e.g. notes.txt"}
+                },
                 "required": ["name"],
             },
         },
@@ -376,6 +388,193 @@ def fastapi_app():
                 "iterations_used": len(iterations),
                 "latency_ms": int((time.perf_counter() - t0) * 1000),
             },
+        }
+
+    # ── T2.1 + T2.2 — event vocabulary and model adapter ──────────────────
+    class AdapterTestRequest(BaseModel):
+        prompt: str = "List my files, then read whichever one you find."
+        model: str = "claude-haiku-4-5-20251001"
+        with_tools: bool = True
+        system: str | None = None
+
+    @web_app.post("/api/debug/adapter")
+    async def debug_adapter(req: AdapterTestRequest):
+        """Exercise the adapter in isolation — no loop yet.
+
+        Proves: provider stream -> OUR event vocabulary, tool arguments
+        accumulate correctly from partial JSON, usage is captured, and
+        message construction round-trips.
+        """
+        from harness.adapters.anthropic_adapter import AnthropicAdapter
+        from harness.adapters.base import ToolResult
+        from harness.events import (
+            StreamEnd, TextDelta, ToolUseEnd, ToolUseStart, Usage,
+        )
+
+        adapter = AnthropicAdapter()
+        messages = [{"role": "user", "content": req.prompt}]
+        tools = AGENT_TOOLS if req.with_tools else None
+
+        # Budget check BEFORE sending — this is the mechanism that will
+        # enforce <1500 system / <1200 tool-definition limits.
+        pre_count = await adapter.count_tokens(
+            model=req.model, messages=messages,
+            system=req.system, tools=tools,
+        )
+        # Count again with NO tools, so we can isolate what the tool
+        # definitions actually cost from what the prompt costs.
+        bare_count = await adapter.count_tokens(
+            model=req.model, messages=messages,
+            system=req.system, tools=None,
+        )
+
+        counts: dict[str, int] = {}
+        text = ""
+        tool_calls: list = []
+        usage = None
+        stop_reason = None
+
+        async for ev in adapter.stream(
+            model=req.model, messages=messages,
+            system=req.system, tools=tools, max_tokens=1024,
+        ):
+            counts[ev.type] = counts.get(ev.type, 0) + 1
+            if isinstance(ev, TextDelta):
+                text += ev.text
+            elif isinstance(ev, ToolUseEnd):
+                tool_calls.append(ev)
+            elif isinstance(ev, Usage):
+                usage = ev
+            elif isinstance(ev, StreamEnd):
+                stop_reason = ev.stop_reason
+
+        # Round-trip the message builders: everything provider-shaped
+        # lives in the adapter, so the loop never sees Anthropic's format.
+        assistant_msg = adapter.assistant_message(text, tool_calls)
+        result_msg = adapter.tool_result_message([
+            ToolResult(call_id=c.id, name=c.name, content="(stub)", ok=True)
+            for c in tool_calls
+        ]) if tool_calls else None
+
+        return {
+            "event_counts": counts,
+            "text": text,
+            "tool_calls": [{"id": c.id, "name": c.name, "args": c.args}
+                           for c in tool_calls],
+            "stop_reason": stop_reason,
+            "usage": usage.to_dict() if usage else None,
+            "pre_send_token_count": pre_count,
+            # ── Provenance. Never guess whether a redeploy landed again. ──
+            "tokens_prompt_only": bare_count,
+            "tokens_tool_overhead": pre_count - bare_count,
+            # Echo back the EXACT definitions being sent to the model.
+            # If this doesn't match your local file, you're serving stale code.
+            "tools_sent": [
+                {"name": t["name"],
+                 "description": t["description"],
+                 "description_chars": len(t["description"])}
+                for t in (tools or [])
+            ],
+            "constructed_assistant_message": assistant_msg,
+            "constructed_tool_result_message": result_msg,
+            # If this is >1 for a normal reply, streaming is working:
+            # you received the answer in fragments, not one blob.
+            "text_delta_count": counts.get("text_delta", 0),
+        }
+
+    # ── T2.3 + T2.4 — registry + real loop ────────────────────────────────
+    def build_debug_registry():
+        """Toy registry to exercise the loop. Day 4 replaces this with
+        agents/agent_a/registry.py — the loop itself won't change."""
+        from harness.tools import ToolRegistry, ToolOut
+
+        reg = ToolRegistry()
+
+        @reg.tool(name="list_files",
+                  description="List the user's uploaded files.",
+                  schema={"type": "object", "properties": {}, "required": []})
+        def _list(args, ctx):
+            out = sh(ctx["sandbox"], "ls -1 /data/uploads")
+            names = out["stdout"].strip()
+            return ToolOut(content=names or "(no files)",
+                           summary=f"{len(names.splitlines())} file(s)")
+
+        @reg.tool(name="read_file",
+                  description="Read one uploaded file. Call list_files first.",
+                  schema={"type": "object",
+                          "properties": {"name": {"type": "string"}},
+                          "required": ["name"]},
+                  max_result_chars=4000)
+        def _read(args, ctx):
+            import shlex
+            fn = args.get("name", "")
+            if not fn or "/" in fn or ".." in fn:
+                return ToolOut(ok=False, summary="bad filename",
+                               content="ERROR: filename only, no paths.")
+            out = sh(ctx["sandbox"], f"cat /data/uploads/{shlex.quote(fn)}")
+            if out["returncode"] != 0:
+                return ToolOut(ok=False, summary="not found",
+                               content=f"ERROR: {out['stderr'].strip()}")
+            return ToolOut(content=out["stdout"], summary=f"read {fn}")
+
+        # A tool that always fails — proves the loop survives tool errors
+        # and the model recovers instead of the turn dying.
+        @reg.tool(name="broken_tool",
+                  description="Deliberately broken. For testing only.",
+                  schema={"type": "object", "properties": {}, "required": []})
+        def _broken(args, ctx):
+            raise RuntimeError("this tool is intentionally broken")
+
+        return reg
+
+    class LoopRequest(BaseModel):
+        prompt: str = "What files do I have, and what do they say?"
+        user_id: str = "kartik"
+        model: str = "claude-sonnet-5"
+        max_iterations: int = 8
+        cache: bool = False
+
+    @web_app.post("/api/debug/loop")
+    async def debug_loop(req: LoopRequest):
+        """The real harness, running end to end. Returns the full event
+        stream as JSON so you can inspect it before T2.8 adds SSE."""
+        from harness.adapters.anthropic_adapter import AnthropicAdapter
+        from harness.loop import run_turn
+
+        sb, reused = get_or_create_sandbox(req.user_id)
+        sh(sb, "mkdir -p /data/uploads && [ -f /data/uploads/notice.txt ] || "
+               "printf 'FIVE DAY NOTICE\\n\\nRent of $4,200 is past due for "
+               "400 W Madison St, Chicago IL.\\nPay within five days.\\n' "
+               "> /data/uploads/notice.txt")
+
+        messages: list[dict] = [{"role": "user", "content": req.prompt}]
+        collected: list[dict] = []
+        text = ""
+
+        async for ev in run_turn(
+            adapter=AnthropicAdapter(),
+            model=req.model,
+            messages=messages,          # mutated in place; caller persists
+            registry=build_debug_registry(),
+            system="You are a helpful assistant with access to the user's files.",
+            ctx={"sandbox": sb, "user_id": req.user_id},
+            max_iterations=req.max_iterations,
+            cache=req.cache,
+            session_id="debug",
+        ):
+            d = ev.to_dict()
+            if ev.type == "text_delta":
+                text += d["text"]
+                continue          # collapse deltas for readable output
+            collected.append(d)
+
+        return {
+            "sandbox_reused": reused,
+            "final_text": text,
+            "events": collected,
+            # messages now holds the full turn — this is what Day 3 persists
+            # to events.jsonl so the session survives sandbox recycling.
+            "message_count": len(messages),
         }
 
     @web_app.delete("/api/debug/sandbox")

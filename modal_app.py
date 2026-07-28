@@ -34,7 +34,7 @@ api_image = (
     # pip_install — Modal requires local layers last. Without this you get
     # ModuleNotFoundError: no module named 'harness' at runtime, because
     # Modal only auto-mounts the entrypoint file, not your packages.
-    .add_local_python_source("harness", "infra")
+    .add_local_python_source("harness", "infra", "obs")
 )
 
 sandbox_image = (
@@ -57,6 +57,12 @@ llm_secret = modal.Secret.from_name("anthropic-kartik")
 # container handling turn 1 created.
 sandbox_registry = modal.Dict.from_name(
     "ailaw-kartik-sandboxes", create_if_missing=True
+)
+
+# Traces are OPERATOR data, so one shared volume rather than per-user ones.
+# (Session events on Day 3 are user data and do get per-user volumes.)
+traces_volume = modal.Volume.from_name(
+    "ailaw-kartik-traces", create_if_missing=True
 )
 
 SANDBOX_TIMEOUT_S = 40 * 60      # hard ceiling, matches DocDraft's stated setup
@@ -135,6 +141,7 @@ def sh(sb, command: str, timeout: int = 30) -> dict:
 @app.function(
     image=api_image,
     secrets=[llm_secret],
+    volumes={"/traces": traces_volume},
     min_containers=0,
     timeout=60 * 15,
 )
@@ -860,6 +867,10 @@ def fastapi_app():
         collected: list[dict] = []
         text = ""
 
+        from obs.tracer import Tracer
+        tracer = Tracer(turn_id=turn_id, session_id="debug",
+                        user_id=req.user_id, agent="A")
+
         try:
             async for ev in run_turn(
                 adapter=AnthropicAdapter(),
@@ -876,6 +887,9 @@ def fastapi_app():
                 # would leave a half-written message and corrupt history.
                 cancel_check=lambda: locks.is_cancelled(req.user_id, turn_id),
             ):
+                # Observe BEFORE to_dict(): the tracer backfills cost_usd
+                # on usage/turn_end events, so the client sees real dollars.
+                tracer.observe(ev)
                 d = ev.to_dict()
                 if ev.type == "text_delta":
                     text += d["text"]
@@ -886,8 +900,18 @@ def fastapi_app():
             # already running" until the 15-minute stale timeout expires.
             locks.release(req.user_id)
 
+        trace = tracer.finish()
+        traces_volume.commit()   # without this, other containers can't see it
+
         return {
             "turn_id": turn_id,
+            "trace_summary": {
+                "totals": trace["totals"],
+                "by_model": trace["by_model"],
+                "latency_breakdown": trace["latency_breakdown"],
+                "pricing_verified": trace["pricing_verified"],
+                "pricing_notes": trace["pricing_notes"],
+            },
             "sandbox_reused": reused,
             "final_text": text,
             "events": collected,
@@ -896,6 +920,161 @@ def fastapi_app():
             # orphaned tool_use block behind.
             "session_integrity": validate_messages(messages),
         }
+
+    # ── T2.8 — SSE streaming ──────────────────────────────────────────────
+    class ChatRequest(BaseModel):
+        prompt: str
+        user_id: str = "kartik"
+        session_id: str = "debug"
+        agent: str = "A"
+        model: str = "claude-sonnet-5"
+        max_iterations: int = 8
+        cache: bool = True
+
+    HEARTBEAT_S = 15
+
+    @web_app.post("/api/chat")
+    async def chat(req: ChatRequest):
+        """Stream a turn to the client as Server-Sent Events.
+
+        Frame format:  data: {"type": "...", ...}\n\n
+        The two trailing newlines terminate a frame — omit one and the
+        browser buffers forever.
+        """
+        import asyncio as _a
+        from fastapi.responses import StreamingResponse
+        from harness.adapters.anthropic_adapter import AnthropicAdapter
+        from harness.loop import run_turn
+        from harness.events import ErrorEvent
+        from obs.tracer import Tracer
+        import uuid as _uuid
+
+        turn_id = _uuid.uuid4().hex[:12]
+        # Reject the double-submit BEFORE opening the stream — a 409 the
+        # client can read is better than an error event mid-stream.
+        if not locks.acquire(req.user_id, turn_id, req.session_id):
+            raise HTTPException(409, "a turn is already running for this user")
+
+        sb, _ = get_or_create_sandbox(req.user_id)
+        sh(sb, "mkdir -p /data/uploads && [ -f /data/uploads/notice.txt ] || "
+               "printf 'FIVE DAY NOTICE\\n\\nRent of $4,200 is past due for "
+               "400 W Madison St, Chicago IL.\\nPay within five days.\\n' "
+               "> /data/uploads/notice.txt")
+
+        tracer = Tracer(turn_id=turn_id, session_id=req.session_id,
+                        user_id=req.user_id, agent=req.agent)
+        messages: list[dict] = [{"role": "user", "content": req.prompt}]
+
+        async def event_stream():
+            # Producer/consumer rather than a direct `async for`. This is
+            # what makes heartbeats possible (the consumer times out waiting
+            # and emits a ping), and on Day 6 it makes "keep running after
+            # the client disconnects" a matter of not cancelling the task.
+            queue: _a.Queue = _a.Queue()
+
+            async def produce():
+                try:
+                    async for ev in run_turn(
+                        adapter=AnthropicAdapter(),
+                        model=req.model,
+                        messages=messages,
+                        registry=build_debug_registry(),
+                        system="You are a helpful assistant with access to "
+                               "the user's files.",
+                        ctx={"sandbox": sb, "user_id": req.user_id},
+                        max_iterations=req.max_iterations,
+                        cache=req.cache,
+                        turn_id=turn_id,
+                        session_id=req.session_id,
+                        agent=req.agent,
+                        cancel_check=lambda: locks.is_cancelled(
+                            req.user_id, turn_id),
+                    ):
+                        await queue.put(ev)
+                except Exception as e:
+                    await queue.put(ErrorEvent(
+                        code="internal", message=f"{type(e).__name__}: {e}"))
+                finally:
+                    await queue.put(None)          # sentinel
+
+            task = _a.create_task(produce())
+            try:
+                while True:
+                    try:
+                        ev = await _a.wait_for(queue.get(),
+                                               timeout=HEARTBEAT_S)
+                    except _a.TimeoutError:
+                        # Comment frame. Proxies see traffic; the browser
+                        # ignores it. Long tool calls need this.
+                        yield ": heartbeat\n\n"
+                        continue
+                    if ev is None:
+                        break
+                    tracer.observe(ev)   # backfills cost_usd before the wire
+                    yield ev.to_sse()
+            finally:
+                # Runs on normal completion AND on client disconnect.
+                # Without it, closing the tab locks the user out until the
+                # 15-minute stale timeout.
+                task.cancel()
+                locks.release(req.user_id)
+                try:
+                    tracer.finish()
+                    traces_volume.commit()
+                except Exception:
+                    pass
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                # Stops proxies buffering the whole response into one lump,
+                # which silently defeats streaming.
+                "X-Accel-Buffering": "no",
+                "X-Turn-Id": turn_id,
+            },
+        )
+
+    @web_app.get("/debug")
+    def debug_page():
+        """Minimal streaming client. curl proves the SERVER streams; this
+        proves a BROWSER can parse it — note fetch + ReadableStream, not
+        EventSource, because EventSource cannot POST."""
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse(DEBUG_HTML)
+
+    @web_app.get("/api/trace/{turn_id}")
+    def get_trace(turn_id: str):
+        """Debug a run after the fact — the spec's observability requirement,
+        made concrete. Day 6 puts a timeline UI on top of this."""
+        import json as _json
+        from pathlib import Path as _P
+        traces_volume.reload()      # pick up writes from other containers
+        f = _P("/traces") / f"{turn_id}.json"
+        if not f.exists():
+            raise HTTPException(404, f"no trace for turn {turn_id}")
+        return _json.loads(f.read_text())
+
+    @web_app.get("/api/traces")
+    def list_traces(limit: int = 20, user_id: str | None = None):
+        import json as _json
+        from pathlib import Path as _P
+        traces_volume.reload()
+        idx = _P("/traces/index.jsonl")
+        if not idx.exists():
+            return {"traces": []}
+        rows = []
+        for line in idx.read_text().splitlines():
+            try:
+                r = _json.loads(line)
+            except Exception:
+                continue
+            if user_id and r.get("user_id") != user_id:
+                continue
+            rows.append(r)
+        return {"traces": list(reversed(rows))[:limit], "total": len(rows)}
 
     @web_app.delete("/api/debug/sandbox")
     def kill_sandbox(user_id: str = "kartik"):
@@ -913,6 +1092,112 @@ def fastapi_app():
         return {"terminated": True, "sandbox_id": rec["sandbox_id"]}
 
     return web_app
+
+
+DEBUG_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>AI Lawyer — stream debug</title>
+<style>
+ body{font:14px/1.5 ui-monospace,Menlo,monospace;background:#0f1115;color:#d8dee9;
+      margin:0;padding:20px;max-width:900px}
+ h1{font-size:15px;color:#8fbcbb;margin:0 0 14px}
+ #bar{display:flex;gap:8px;margin-bottom:14px}
+ input{flex:1;background:#1b1f27;border:1px solid #2e3440;color:#eceff4;
+       padding:9px;border-radius:5px;font:inherit}
+ button{background:#5e81ac;border:0;color:#fff;padding:9px 16px;border-radius:5px;
+        cursor:pointer;font:inherit}
+ button.cancel{background:#bf616a}
+ #out{white-space:pre-wrap;word-break:break-word}
+ .ev{padding:2px 0}
+ .text{color:#eceff4}
+ .tool{color:#ebcb8b}
+ .usage{color:#5e81ac}
+ .err{color:#bf616a}
+ .end{color:#a3be8c;border-top:1px solid #2e3440;margin-top:8px;padding-top:8px}
+ .struct{color:#b48ead}
+ .hb{color:#4c566a}
+</style></head><body>
+<h1>AI Lawyer — SSE debug client</h1>
+<div id="bar">
+  <input id="q" value="What files do I have, and what do they say?">
+  <button id="send">Send</button>
+  <button id="cancel" class="cancel">Cancel</button>
+</div>
+<div id="out"></div>
+<script>
+const out = document.getElementById('out');
+const log = (cls, msg) => {
+  const d = document.createElement('div');
+  d.className = 'ev ' + cls; d.textContent = msg; out.appendChild(d);
+  window.scrollTo(0, document.body.scrollHeight);
+};
+let textNode = null;
+
+document.getElementById('cancel').onclick = () =>
+  fetch('/api/turn/cancel?user_id=kartik', {method:'POST'});
+
+document.getElementById('send').onclick = async () => {
+  out.innerHTML = ''; textNode = null;
+  const t0 = performance.now();
+
+  // EventSource cannot POST, so: fetch + ReadableStream + manual parsing.
+  const res = await fetch('/api/chat', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({prompt: document.getElementById('q').value})
+  });
+  if (!res.ok) { log('err', 'HTTP ' + res.status + ' ' + await res.text()); return; }
+
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+
+  while (true) {
+    const {done, value} = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, {stream: true});
+
+    // Frames are separated by a BLANK LINE. Keep the trailing partial
+    // frame in the buffer — it will be completed by the next chunk.
+    const frames = buf.split('\\n\\n');
+    buf = frames.pop();
+
+    for (const frame of frames) {
+      if (frame.startsWith(':')) { log('hb', '· heartbeat'); continue; }
+      const line = frame.split('\\n').find(l => l.startsWith('data: '));
+      if (!line) continue;
+      const ev = JSON.parse(line.slice(6));
+      const ms = Math.round(performance.now() - t0);
+
+      switch (ev.type) {
+        case 'text_delta':
+          // Append into one node so text flows instead of stacking lines.
+          if (!textNode) { textNode = document.createElement('div');
+                           textNode.className = 'ev text'; out.appendChild(textNode); }
+          textNode.textContent += ev.text;
+          break;
+        case 'tool_start':
+          textNode = null;
+          log('tool', `[${ms}ms] ▶ ${ev.name} ${ev.args_preview}`); break;
+        case 'tool_end':
+          log('tool', `[${ms}ms] ${ev.ok ? '✓' : '✗'} ${ev.name} (${ev.ms}ms) ${ev.summary}`);
+          break;
+        case 'structured_block':
+          log('struct', `[${ms}ms] ⬒ ${ev.kind} ${JSON.stringify(ev.payload)}`); break;
+        case 'usage':
+          log('usage', `[${ms}ms] ${ev.model}  in ${ev.input_tokens}  out ${ev.output_tokens}`
+              + `  cache_r ${ev.cache_read_input_tokens}  cache_w ${ev.cache_creation_input_tokens}`
+              + `  $${ev.cost_usd}`); break;
+        case 'error':
+          log('err', `[${ms}ms] ERROR ${ev.code}: ${ev.message}`); break;
+        case 'turn_end':
+          log('end', `${ev.stop_reason} · ttft ${ev.ttft_ms}ms · total ${ev.total_ms}ms`
+              + ` · in ${ev.billed_input_tokens} · out ${ev.billed_output_tokens}`
+              + ` · $${ev.cost_usd}`); break;
+      }
+    }
+  }
+};
+</script></body></html>"""
 
 
 @app.local_entrypoint()

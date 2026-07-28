@@ -33,3 +33,13 @@ Version	tokens_tool_overhead	Δ
 Terse	608	—
 Trimmed (live now)	630	+22
 Your verbose (never actually deployed)	~800 est.	~+200
+
+749 × 3 iterations  =  2,247 tokens
+total billed input  =  2,521 tokens
+                       ────────────
+static prefix       =     89%
+
+
+
+**a small leak worth fixing**
+"content_head": "ERROR: cat: /data/uploads/nope.txt: No such file or directory"

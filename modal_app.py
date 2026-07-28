@@ -517,15 +517,118 @@ def fastapi_app():
                                content=f"ERROR: {out['stderr'].strip()}")
             return ToolOut(content=out["stdout"], summary=f"read {fn}")
 
-        # A tool that always fails — proves the loop survives tool errors
-        # and the model recovers instead of the turn dying.
+        # ── Tools that exist only to prove the invariants ─────────────────
+
         @reg.tool(name="broken_tool",
                   description="Deliberately broken. For testing only.",
                   schema={"type": "object", "properties": {}, "required": []})
         def _broken(args, ctx):
             raise RuntimeError("this tool is intentionally broken")
 
+        @reg.tool(name="slow_tool",
+                  description="Sleeps. For testing timeouts.",
+                  schema={"type": "object", "properties": {}, "required": []},
+                  timeout=2)
+        async def _slow(args, ctx):
+            import asyncio as _a
+            await _a.sleep(10)
+            return ToolOut(content="should never be reached")
+
+        @reg.tool(name="big_tool",
+                  description="Returns a lot of text. For testing caps.",
+                  schema={"type": "object", "properties": {}, "required": []},
+                  max_result_chars=200)
+        def _big(args, ctx):
+            return ToolOut(content="x" * 5000)
+
+        # Halting tools end the turn. Day 5 uses this for Agent B; here it
+        # only proves the registry records the flag.
+        @reg.tool(name="halting_stub",
+                  description="Halts the turn. For testing only.",
+                  schema={"type": "object", "properties": {}, "required": []},
+                  halting=True)
+        def _halt(args, ctx):
+            return ToolOut(content="halted",
+                           payload={"kind": "question_form", "questions": []})
+
         return reg
+
+    @web_app.post("/api/debug/registry/selftest")
+    async def registry_selftest(user_id: str = "kartik"):
+        """Exercise the registry directly — no loop, no model.
+
+        Every case below must return a ToolOut. If any of them RAISES,
+        dispatch() is broken and the loop will die on the first bad tool call.
+        """
+        sb, _ = get_or_create_sandbox(user_id)
+        sh(sb, "mkdir -p /data/uploads && [ -f /data/uploads/notice.txt ] || "
+               "echo 'FIVE DAY NOTICE - rent past due' > /data/uploads/notice.txt")
+        reg = build_debug_registry()
+        ctx = {"sandbox": sb, "user_id": user_id}
+
+        cases = []
+
+        async def case(name, expect, tool, args):
+            """Run one dispatch. Catching Exception here is the POINT:
+            if anything reaches this handler, the invariant is violated."""
+            try:
+                out = await reg.dispatch(tool, args, ctx)
+                cases.append({
+                    "case": name,
+                    "raised": False,
+                    "ok": out.ok,
+                    "expected_ok": expect,
+                    "pass": out.ok is expect,
+                    "summary": out.summary,
+                    "content_head": out.content[:110],
+                    "content_tail": out.content[-110:],     
+                    "content_len": len(out.content),
+                })
+            except Exception as e:
+                cases.append({
+                    "case": name, "raised": True, "pass": False,
+                    "error": f"{type(e).__name__}: {e}",
+                })
+
+        await case("happy: list_files",        True,  "list_files", {})
+        await case("happy: read_file",         True,  "read_file", {"name": "notice.txt"})
+        await case("reject: path traversal",   False, "read_file",
+                   {"name": "../../etc/passwd"})
+        await case("reject: missing file",     False, "read_file", {"name": "nope.txt"})
+        await case("reject: unknown tool",     False, "does_not_exist", {})
+        await case("survive: handler raises",  False, "broken_tool", {})
+        await case("survive: timeout",         False, "slow_tool", {})
+        await case("reject: malformed args",   False, "read_file",
+                   {"_parse_error": True, "_raw": "{bad"})
+        await case("cap: truncation",          True,  "big_tool", {})
+
+        # Extra assertions that aren't dispatch calls
+        trunc = next(c for c in cases if c["case"] == "cap: truncation")
+        structural = [
+            {"case": "cap: marker present",
+             "pass": "[TRUNCATED" in trunc.get("content_tail", "")},
+            {"case": "cap: under limit",
+             "pass": trunc.get("content_len", 99999) < 400},
+            {"case": "halting flag recorded",
+             "pass": reg.is_halting("halting_stub") is True},
+            {"case": "non-halting default",
+             "pass": reg.is_halting("read_file") is False},
+            {"case": "subset() gates tools",
+             "pass": reg.subset(["list_files"]).names() == ["list_files"]},
+            {"case": "unknown tool not halting",
+             "pass": reg.is_halting("nope") is False},
+        ]
+
+        all_cases = cases + structural
+        return {
+            "passed": sum(1 for c in all_cases if c.get("pass")),
+            "total": len(all_cases),
+            "all_passed": all(c.get("pass") for c in all_cases),
+            "any_raised": any(c.get("raised") for c in cases),
+            "tool_count": len(reg.names()),
+            "tools": reg.names(),
+            "cases": all_cases,
+        }
 
     class LoopRequest(BaseModel):
         prompt: str = "What files do I have, and what do they say?"

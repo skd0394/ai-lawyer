@@ -46,6 +46,15 @@ class ModelAdapter(Protocol):
         """Yield TextDelta / ToolUseStart / ToolUseEnd / Usage / StreamEnd."""
         ...
 
+    def format_tools(self, defs: list[dict], cache_last: bool = False) -> list[dict] | None:
+        """Neutral [{name, description, schema}] -> provider tool format.
+
+        Anthropic wants `input_schema`; OpenAI nests under
+        `function.parameters`. Same reason message construction lives here:
+        the loop must not know which provider it is talking to.
+        """
+        ...
+
     def assistant_message(self, text: str, tool_calls: list[ToolUseEnd]) -> dict:
         ...
 

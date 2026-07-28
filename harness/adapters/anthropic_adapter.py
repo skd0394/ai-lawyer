@@ -122,7 +122,25 @@ class AnthropicAdapter:
                 backoff = min(2 ** attempt, 8) + random.uniform(0, 0.5)
                 await asyncio.sleep(backoff)
 
-    # ── 2 & 3. message construction (provider-specific, lives here) ───────
+    # ── 2. tool + message construction (provider-specific, lives here) ────
+    def format_tools(self, defs: list[dict],
+                     cache_last: bool = False) -> list[dict] | None:
+        if not defs:
+            return None
+        out = [
+            {"name": d["name"],
+             "description": d["description"],
+             "input_schema": d["schema"]}
+            for d in defs
+        ]
+        if cache_last:
+            # Cache breakpoint after the LAST tool definition. Tool defs are
+            # byte-identical for the whole session, so iterations 2..N read
+            # them from cache instead of reprocessing ~600+ tokens each time.
+            # Lit up properly in T2.6.
+            out[-1] = {**out[-1], "cache_control": {"type": "ephemeral"}}
+        return out
+
     def assistant_message(self, text: str, tool_calls: list[ToolUseEnd]) -> dict:
         content: list[dict] = []
         if text:

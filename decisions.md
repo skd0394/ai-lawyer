@@ -43,3 +43,9 @@ static prefix       =     89%
 
 **a small leak worth fixing**
 "content_head": "ERROR: cat: /data/uploads/nope.txt: No such file or directory"
+
+
+limitations.md
+**acquire() is not atomic.**
+
+Two consequences. For Day 6, the UI must switch to "Cancelling…" the instant the button is clicked rather than waiting for turn_end, or it looks broken. For your writeup, this is a deliberate tradeoff worth stating: "I check cancellation only at iteration boundaries. Aborting mid-stream would leave a tool_use block without its tool_result and permanently corrupt the session. I accepted up to one iteration of latency to guarantee the session stays replayable." That's the kind of answer that separates a considered design from a lucky one.

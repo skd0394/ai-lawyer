@@ -55,6 +55,10 @@ class ModelAdapter(Protocol):
         """
         ...
 
+    def format_system(self, system: Any, cache: bool = False) -> Any:
+        """Plain system text -> provider format, optionally cache-marked."""
+        ...
+
     def assistant_message(self, text: str, tool_calls: list[ToolUseEnd]) -> dict:
         ...
 

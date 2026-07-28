@@ -123,6 +123,30 @@ class AnthropicAdapter:
                 await asyncio.sleep(backoff)
 
     # ── 2. tool + message construction (provider-specific, lives here) ────
+    def format_system(self, system: Any, cache: bool = False) -> Any:
+        """Cache breakpoint #2, after the system prompt.
+
+        Anthropic accepts either a plain string or a list of text blocks.
+        cache_control can only be attached to a block, so caching requires
+        the list form.
+
+        NOTE: caching has a MINIMUM prefix length. Under it, this marker is
+        silently ignored — no error, just cache_creation_input_tokens: 0.
+        Verify the current threshold in the prompt-caching docs before
+        concluding the code is broken.
+        """
+        if not system:
+            return None
+        if not cache:
+            return system
+        if isinstance(system, str):
+            return [{"type": "text", "text": system,
+                     "cache_control": {"type": "ephemeral"}}]
+        # already block form: mark the last block
+        blocks = list(system)
+        blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+        return blocks
+
     def format_tools(self, defs: list[dict],
                      cache_last: bool = False) -> list[dict] | None:
         if not defs:

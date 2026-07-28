@@ -57,6 +57,10 @@ async def run_turn(
     stop_reason = "max_iterations"
 
     tool_defs = adapter.format_tools(registry.definitions(), cache_last=cache)
+    # Both breakpoints sit on content that is byte-identical for the whole
+    # session, so iterations 2..N read them from cache instead of paying
+    # full price to reprocess the same bytes every time.
+    system_fmt = adapter.format_system(system, cache=cache)
 
     yield TurnStart(turn_id=turn_id, session_id=session_id, agent=agent)
 
@@ -72,7 +76,7 @@ async def run_turn(
 
         try:
             async for ev in adapter.stream(
-                model=model, messages=messages, system=system,
+                model=model, messages=messages, system=system_fmt,
                 tools=tool_defs, max_tokens=max_tokens,
             ):
                 if isinstance(ev, TextDelta):

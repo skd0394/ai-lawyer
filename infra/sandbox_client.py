@@ -27,6 +27,7 @@ from typing import Any
 WORKER_DIR = "/tmp/aw"
 WORKER_PATH = f"{WORKER_DIR}/worker.py"
 EXTRACT_PATH = f"{WORKER_DIR}/extract.py"
+DOCX_PATH = f"{WORKER_DIR}/docx_writer.py"
 
 # sandbox_id -> live worker, per API container.
 _WORKERS: dict[str, "PersistentWorker"] = {}
@@ -37,7 +38,8 @@ class WorkerUnavailable(Exception):
     pass
 
 
-def install_worker(sandbox, source: str, extract_source: str = "") -> None:
+def install_worker(sandbox, source: str, extract_source: str = "",
+                   docx_source: str = "") -> None:
     """Push worker.py (and extract.py) into the sandbox.
 
     base64 avoids every shell quoting problem — the sources contain quotes,
@@ -49,6 +51,9 @@ def install_worker(sandbox, source: str, extract_source: str = "") -> None:
     if extract_source:
         eb = base64.b64encode(extract_source.encode()).decode()
         cmd += f" && echo '{eb}' | base64 -d > {EXTRACT_PATH}"
+    if docx_source:
+        db = base64.b64encode(docx_source.encode()).decode()
+        cmd += f" && echo '{db}' | base64 -d > {DOCX_PATH}"
     cmd += " && echo INSTALLED"
 
     p = sandbox.exec("bash", "-c", cmd)
@@ -109,10 +114,11 @@ class PersistentWorker:
 
 class SandboxClient:
     def __init__(self, sandbox, worker_source: str,
-                 extract_source: str = ""):
+                 extract_source: str = "", docx_source: str = ""):
         self.sandbox = sandbox
         self.source = worker_source
         self.extract_source = extract_source
+        self.docx_source = docx_source
         self.sandbox_id = getattr(sandbox, "object_id", str(id(sandbox)))
         self.transport = "unknown"
 
@@ -122,7 +128,7 @@ class SandboxClient:
             if w is not None and not w.dead:
                 return w
             install_worker(self.sandbox, self.source,
-                           self.extract_source)
+                           self.extract_source, self.docx_source)
             w = PersistentWorker(self.sandbox)
             _WORKERS[self.sandbox_id] = w
             return w
@@ -130,7 +136,8 @@ class SandboxClient:
     def _oneshot(self, op: str, args: dict, timeout: int = 60) -> dict:
         b64 = base64.b64encode(
             json.dumps({"id": "1", "op": op, "args": args}).encode()).decode()
-        install_worker(self.sandbox, self.source, self.extract_source)
+        install_worker(self.sandbox, self.source, self.extract_source,
+                       self.docx_source)
         p = self.sandbox.exec("bash", "-c",
                               f"python {WORKER_PATH} --once {b64}")
         p.wait()
@@ -165,8 +172,8 @@ class SandboxClient:
         return r["result"]
 
 
-def worker_source() -> tuple[str, str]:
-    """Read worker.py and extract.py source so they can be pushed in.
+def worker_source() -> tuple[str, str, str]:
+    """Read the sandbox modules' source so they can be pushed in.
 
     Importing is safe: every heavy import in those modules is lazy, and the
     serve loop is behind `if __name__ == '__main__'`.
@@ -174,4 +181,7 @@ def worker_source() -> tuple[str, str]:
     from pathlib import Path
     import sandbox.worker as w
     import sandbox.extract as e
-    return Path(w.__file__).read_text(), Path(e.__file__).read_text()
+    import sandbox.docx_writer as d
+    return (Path(w.__file__).read_text(),
+            Path(e.__file__).read_text(),
+            Path(d.__file__).read_text())

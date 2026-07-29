@@ -31,7 +31,10 @@ async def run_turn(
     system: Any = None,
     ctx: Any = None,
     max_iterations: int = 12,
-    max_tokens: int = 4096,
+    # 4096 truncates legal documents mid-draft. A real operating agreement
+    # is 3,000-6,000 words. You are billed for tokens GENERATED, not for
+    # the ceiling, so a high limit costs nothing until it is used.
+    max_tokens: int = 16000,
     cancel_check: Callable[[], bool] | None = None,
     turn_id: str | None = None,
     session_id: str = "",
@@ -73,6 +76,7 @@ async def run_turn(
 
         text_parts: list[str] = []
         tool_calls: list[ToolUseEnd] = []
+        api_stop: str | None = None
 
         try:
             async for ev in adapter.stream(
@@ -95,7 +99,11 @@ async def run_turn(
                     billed_out += ev.output_tokens
                     yield ev
                 elif isinstance(ev, StreamEnd):
-                    pass
+                    # The PROVIDER's stop reason, distinct from the loop's.
+                    # "max_tokens" here means the model was cut off
+                    # mid-sentence — silently discarding it is how a
+                    # truncated contract reaches a user looking complete.
+                    api_stop = ev.stop_reason
         except Exception as e:
             # Spec: "provider errors surface cleanly instead of hanging."
             # An error is an EVENT. The stream closes tidily and the session
@@ -109,8 +117,16 @@ async def run_turn(
         text = "".join(text_parts)
         messages.append(adapter.assistant_message(text, tool_calls))
 
+        if api_stop == "max_tokens":
+            yield ErrorEvent(
+                code="output_truncated",
+                message=(f"The model hit the {max_tokens}-token output limit "
+                         f"and was cut off mid-generation. The result is "
+                         f"incomplete."),
+                retryable=True)
+
         if not tool_calls:
-            stop_reason = "stop"
+            stop_reason = "truncated" if api_stop == "max_tokens" else "stop"
             break
 
         # ── Execute tools ─────────────────────────────────────────────────

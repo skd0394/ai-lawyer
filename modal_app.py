@@ -766,6 +766,76 @@ def fastapi_app():
             )
 
         @reg.tool(
+            name="write_document",
+            description=(
+                "Write a legal document as a downloadable .docx. Supply the "
+                "body as MARKDOWN (## for clause headings, - for lists, | "
+                "for tables, ** for emphasis). For any detail you do not "
+                "have, insert a bracketed placeholder in capitals such as "
+                "[PARTY A NAME] and keep drafting — never stop to ask. The "
+                "placeholders are reported back to you afterwards."),
+            schema={
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string",
+                                 "description": "e.g. operating-agreement.docx"},
+                    "title": {"type": "string",
+                              "description": "document title, e.g. "
+                                             "'LLC Operating Agreement'"},
+                    "subtitle": {"type": "string",
+                                 "description": "optional, e.g. "
+                                                "'Governed by Illinois law'"},
+                    "markdown": {"type": "string",
+                                 "description": "the full document body"},
+                },
+                "required": ["filename", "title", "markdown"],
+            },
+            max_result_chars=3000,
+            timeout=180,
+        )
+        def _write_doc(args, ctx):
+            md = args.get("markdown") or ""
+            if len(md.strip()) < 50:
+                return ToolOut(ok=False, summary="empty document",
+                               content="ERROR: markdown body is empty or "
+                                       "too short. Draft the document text "
+                                       "before calling this tool.")
+            r = ctx["worker"].call("write_docx", {
+                "markdown": md,
+                "title": args.get("title", "Document"),
+                "subtitle": args.get("subtitle", ""),
+                "filename": args.get("filename", "draft.docx"),
+            }, timeout=150)
+            if not r.get("ok"):
+                return ToolOut(ok=False, summary="generation failed",
+                               content=f"ERROR: could not generate the "
+                                       f"document: {r.get('error')}")
+            res = r["result"]
+            url = (f"/api/files/outputs/{res['filename']}"
+                   f"?user_id={ctx['user_id']}")
+            lines = [
+                f"Document written: {res['filename']} "
+                f"({res['word_count']} words, {res['bytes']} bytes)",
+                f"Download: {url}",
+            ]
+            if res["placeholders"]:
+                lines.append(
+                    f"\n{res['placeholder_count']} placeholder(s) remain and "
+                    f"MUST be reported to the user verbatim:")
+                lines += [f"  {p}" for p in res["placeholders"]]
+            else:
+                lines.append("\nNo placeholders — the draft is complete.")
+            return ToolOut(
+                content="\n".join(lines),
+                summary=f"{res['filename']} ({res['word_count']} words, "
+                        f"{res['placeholder_count']} placeholders)",
+                payload={"kind": "document", "filename": res["filename"],
+                         "download_url": url,
+                         "word_count": res["word_count"],
+                         "placeholders": res["placeholders"]},
+            )
+
+        @reg.tool(
             name="read_cached_page",
             description=(
                 "Retrieve more of a page already fetched, by handle. Use "
@@ -1209,6 +1279,7 @@ def fastapi_app():
         agent: str = "A"
         model: str = "claude-sonnet-5"
         max_iterations: int = 8
+        max_tokens: int = 16000
         cache: bool = True
 
     HEARTBEAT_S = 15
@@ -1282,6 +1353,7 @@ def fastapi_app():
                              "worker": worker_client(req.user_id),
                              "citations": citations},
                         max_iterations=req.max_iterations,
+                        max_tokens=req.max_tokens,
                         cache=req.cache,
                         turn_id=turn_id,
                         session_id=req.session_id,
@@ -1417,6 +1489,28 @@ def fastapi_app():
                 "rendered_tokens": tokens,
                 "rendered": rendered,
                 "raw": payload.get("results", [])}
+
+    # ── T4.4 — DOCX generation ────────────────────────────────────────────
+    class DocxRequest(BaseModel):
+        markdown: str
+        title: str = "Agreement"
+        subtitle: str = ""
+        filename: str = "draft.docx"
+        user_id: str = "kartik"
+
+    @web_app.post("/api/debug/docx")
+    def debug_docx(req: DocxRequest):
+        c = worker_client(req.user_id)
+        r = c.call("write_docx", {
+            "markdown": req.markdown, "title": req.title,
+            "subtitle": req.subtitle, "filename": req.filename,
+        }, timeout=120)
+        if not r.get("ok"):
+            raise HTTPException(500, r.get("error", "docx generation failed"))
+        res = r["result"]
+        res["download_url"] = (f"/api/files/outputs/{res['filename']}"
+                               f"?user_id={req.user_id}")
+        return res
 
     # ── T4.2 — fetch with extract-then-discard ────────────────────────────
     @web_app.post("/api/debug/fetch")
@@ -1719,8 +1813,8 @@ def fastapi_app():
     def worker_client(user_id: str):
         from infra.sandbox_client import SandboxClient, worker_source
         sb, _ = get_or_create_sandbox(user_id)
-        wsrc, esrc = worker_source()
-        return SandboxClient(sb, wsrc, esrc)
+        wsrc, esrc, dsrc = worker_source()
+        return SandboxClient(sb, wsrc, esrc, dsrc)
 
     @web_app.post("/api/debug/worker/selftest")
     def worker_selftest(user_id: str = "kartik"):

@@ -332,6 +332,29 @@ def op_read_cached(args: dict) -> dict:
             "truncated": len(text) > limit, "total_chars": len(text)}
 
 
+def op_write_docx(args: dict) -> dict:
+    """Render markdown to a styled .docx in outputs/.
+
+    Writes go to outputs/ only — safe_path enforces it, so a draft can
+    never overwrite something the user uploaded.
+    """
+    from docx_writer import markdown_to_docx
+
+    name = args["filename"]
+    if not name.lower().endswith(".docx"):
+        name += ".docx"
+    full = safe_path(f"outputs/{os.path.basename(name)}", areas=("outputs",))
+    r = markdown_to_docx(
+        md=args.get("markdown", ""),
+        title=args.get("title", "Document"),
+        subtitle=args.get("subtitle", ""),
+        out_path=full,
+    )
+    r["path"] = rel(full)
+    r["filename"] = os.path.basename(full)
+    return r
+
+
 def op_extract(args: dict) -> dict:
     """Extract a document to markdown. Heavy imports (pymupdf, python-docx,
     openpyxl) live inside extract.py and are only pulled in here — the API
@@ -349,6 +372,7 @@ def op_extract(args: dict) -> dict:
 
 OPS = {
     "extract": op_extract,
+    "write_docx": op_write_docx,
     "fetch_url": op_fetch_url,
     "read_cached": op_read_cached,
     "ping": op_ping,

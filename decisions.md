@@ -78,3 +78,12 @@ That's a better outcome than building the proxy. Write it up as a decision:
 "Rather than proxying LLM access into the sandbox, I arranged the trust boundary so the sandbox never needs a model. It extracts and rasterises; the orchestrator does all inference. The key isn't merely hidden from the sandbox — the sandbox has no reason to want it. A proxy would have been an attack surface protecting a capability nothing needed."
 
 If an evaluator pushes on it, the honest follow-up is: if a future tool genuinely needed sandbox-side inference, you'd mint short-lived HMAC tokens bound to user_id and add a /internal/llm endpoint — but you'd first ask whether the work could move orchestrator-side instead.
+
+
+"Below ~4,500 chars the tool passes the page through unmodified — extraction costs more than it saves, and I short-circuit rather than pretend otherwise. Above that, reduction scales with page size: 3× at 7k chars, 9–10× at 40k. Legal research fetches are overwhelmingly the large kind — statutory articles, court opinions, CFR parts — so the effective reduction on real workloads sits near the top of that range. Output size is roughly flat at 600–1,000 tokens regardless of input, which is the property that actually matters: page size stops driving context growth."
+
+  1288ch | naive    495 | ours   560 |   0.9x | short-circuit
+  1895ch | naive    733 | ours   798 |   0.9x | short-circuit
+  7332ch | naive   2337 | ours   740 |   3.2x | extracted
+ 37173ch | naive  14045 | ours   883 |  15.9x | extracted
+ 42341ch | naive  15719 | ours  1159 |  13.6x | extracted

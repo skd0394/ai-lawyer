@@ -34,12 +34,18 @@ api_image = (
     # pip_install — Modal requires local layers last. Without this you get
     # ModuleNotFoundError: no module named 'harness' at runtime, because
     # Modal only auto-mounts the entrypoint file, not your packages.
-    .add_local_python_source("harness", "infra", "obs", "sandbox")
+    .add_local_python_source("harness", "infra", "obs", "sandbox",
+                             "agents")
 )
 
 sandbox_image = (
     modal.Image.debian_slim(python_version="3.11")
+    # debian_slim ships no CA bundle, so every HTTPS fetch fails with
+    # CERTIFICATE_VERIFY_FAILED. worker.py also pins certifi explicitly —
+    # belt and braces, because Modal sets SSL_CERT_DIR in the sandbox env.
+    .apt_install("ca-certificates")
     .pip_install(
+        "certifi",
         "pymupdf",          # PDF text + rasterisation
         "python-docx",      # DOCX read + write
         "openpyxl",         # XLSX
@@ -50,6 +56,15 @@ sandbox_image = (
 
 # ⚠️ Attached to the API function ONLY. Never to a Sandbox. See below.
 llm_secret = modal.Secret.from_name("anthropic-kartik")
+
+# Search provider key. Same rule as the LLM key: it is attached to the API
+# function and never to a Sandbox. Optional so the app still deploys before
+# you have created it.
+try:
+    search_secret = modal.Secret.from_name("search-kartik")
+    _SECRETS = [llm_secret, search_secret]
+except Exception:
+    _SECRETS = [llm_secret]
 
 # ── Cross-container state ─────────────────────────────────────────────────
 # Redis-equivalent. Needed because the API is stateless and horizontally
@@ -201,7 +216,7 @@ def sh(sb, command: str, timeout: int = 30) -> dict:
 
 @app.function(
     image=api_image,
-    secrets=[llm_secret],
+    secrets=_SECRETS,
     volumes={"/traces": traces_volume},
     min_containers=0,
     timeout=60 * 15,
@@ -664,6 +679,129 @@ def fastapi_app():
             res = r["result"]
             return ToolOut(content=res["text"], summary=f"read {fn}")
 
+        @reg.tool(
+            name="web_search",
+            description=(
+                "Search the live web. Returns titles, URLs and snippets "
+                "only — call web_fetch to read a page. Prefer [OFFICIAL] "
+                "sources for statutes and court procedure."),
+            schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer", "default": 5},
+                },
+                "required": ["query"],
+            },
+            max_result_chars=3000,
+            timeout=30,
+        )
+        async def _search(args, ctx):
+            from agents.common.search import web_search, format_for_model
+            payload = await web_search(
+                args.get("query", ""),
+                max_results=min(int(args.get("max_results", 5)), 8))
+            if not payload.get("ok"):
+                return ToolOut(ok=False, summary="search failed",
+                               content=format_for_model(payload))
+            n = len(payload["results"])
+            return ToolOut(content=format_for_model(payload),
+                           summary=f"{n} results for "
+                                   f"'{args.get('query', '')[:50]}'")
+
+        @reg.tool(
+            name="web_fetch",
+            description=(
+                "Read a web page. State WHY you want it in `purpose` — only "
+                "the passages bearing on that purpose are returned, with "
+                "quotes verified against the live page. Required before "
+                "citing any source as authoritative."),
+            schema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "purpose": {
+                        "type": "string",
+                        "description": "the specific question this page "
+                                       "should answer",
+                    },
+                },
+                "required": ["url", "purpose"],
+            },
+            max_result_chars=4000,
+            timeout=150,
+        )
+        async def _fetch(args, ctx):
+            from agents.common.fetch import fetch_and_extract, format_for_model
+            from agents.common.citations import CitationRecord
+            from harness.events import Citation
+            from anthropic import AsyncAnthropic
+
+            url = args.get("url", "")
+            r = await fetch_and_extract(
+                worker=ctx["worker"], url=url,
+                purpose=args.get("purpose", "legal research"),
+                client=AsyncAnthropic())
+            body = format_for_model(r)
+
+            reg = ctx.get("citations")
+            if not r.get("fetched"):
+                # A failed fetch is still a citation record — an unverified
+                # one. Otherwise the audit can't tell "never tried" from
+                # "tried and failed".
+                if reg:
+                    reg.add(CitationRecord(url=url, confidence="unverified"))
+                return ToolOut(
+                    ok=False, content=body,
+                    summary=f"could not retrieve {url[:60]}",
+                    events=[Citation(url=url, title="", confidence="unverified")])
+
+            rec = reg.from_fetch(r) if reg else None
+            quote = (r.get("verified_quotes") or [""])[0][:200]
+            return ToolOut(
+                content=body,
+                summary=f"{r['confidence']}: {r.get('title', '')[:60]}",
+                events=[Citation(url=r["url"], title=r.get("title", ""),
+                                 confidence=r["confidence"], quote=quote)],
+            )
+
+        @reg.tool(
+            name="read_cached_page",
+            description=(
+                "Retrieve more of a page already fetched, by handle. Use "
+                "when the extract was not enough."),
+            schema={
+                "type": "object",
+                "properties": {
+                    "handle": {"type": "string"},
+                    "section": {"type": "string",
+                                "description": "optional heading"},
+                },
+                "required": ["handle"],
+            },
+            max_result_chars=8000,
+            timeout=60,
+        )
+        def _read_cached(args, ctx):
+            r = ctx["worker"].call("read_cached", {
+                "handle": args.get("handle", ""),
+                "section": args.get("section"),
+                "max_chars": 8000,
+            })
+            if not r.get("ok"):
+                return ToolOut(ok=False, summary="not cached",
+                               content="ERROR: no such cached page.")
+            res = r["result"]
+            if not res.get("found"):
+                return ToolOut(ok=False, summary="not cached",
+                               content=f"ERROR: {res.get('error')}")
+            if res.get("error"):
+                return ToolOut(ok=False, summary="no such section",
+                               content=f"ERROR: {res['error']} "
+                                       f"Available: {res.get('available')}")
+            return ToolOut(content=res["text"],
+                           summary=f"cached page ({len(res['text'])} chars)")
+
         # ── Tools that exist only to prove the invariants ─────────────────
 
         @reg.tool(name="broken_tool",
@@ -1106,6 +1244,9 @@ def fastapi_app():
         tracer = Tracer(turn_id=turn_id, session_id=req.session_id,
                         user_id=req.user_id, agent=req.agent)
 
+        from agents.common.citations import CitationRegistry
+        citations = CitationRegistry()
+
         # ── T3.1: rebuild context from the volume ─────────────────────────
         # This is what makes turn N remember turn 1 — even if the sandbox
         # that served turn 1 was destroyed hours ago. The model holds no
@@ -1138,7 +1279,8 @@ def fastapi_app():
                         system="You are a helpful assistant with access to "
                                "the user's files.",
                         ctx={"sandbox": sb, "user_id": req.user_id,
-                             "worker": worker_client(req.user_id)},
+                             "worker": worker_client(req.user_id),
+                             "citations": citations},
                         max_iterations=req.max_iterations,
                         cache=req.cache,
                         turn_id=turn_id,
@@ -1155,6 +1297,7 @@ def fastapi_app():
                     await queue.put(None)          # sentinel
 
             task = _a.create_task(produce())
+            answer_text = []
             try:
                 while True:
                     try:
@@ -1168,7 +1311,23 @@ def fastapi_app():
                     if ev is None:
                         break
                     tracer.observe(ev)   # backfills cost_usd before the wire
+                    if ev.type == "text_delta":
+                        answer_text.append(ev.text)
                     yield ev.to_sse()
+
+                # ── T4.3: mechanical citation audit ───────────────────────
+                # A model will happily produce a plausible URL it never
+                # opened. Prompting cannot prevent that; comparing the
+                # answer's URLs against what was actually fetched can.
+                from agents.common.citations import audit_warning
+                from harness.events import StructuredBlock, ErrorEvent
+                audit = citations.audit("".join(answer_text))
+                yield StructuredBlock(kind="citation_audit",
+                                      payload=audit).to_sse()
+                warn = audit_warning(audit)
+                if warn:
+                    yield ErrorEvent(code="citation_warning", message=warn,
+                                     retryable=False).to_sse()
             finally:
                 # Runs on normal completion AND on client disconnect.
                 # Without it, closing the tab locks the user out until the
@@ -1220,6 +1379,107 @@ def fastapi_app():
         EventSource, because EventSource cannot POST."""
         from fastapi.responses import HTMLResponse
         return HTMLResponse(DEBUG_HTML)
+
+    # ── T4.1 — web search ─────────────────────────────────────────────────
+    @web_app.get("/api/debug/search/providers")
+    def search_providers():
+        from agents.common.search import available_providers, PROVIDERS
+        return {"configured": available_providers(),
+                "supported": [c.name for _, c in PROVIDERS],
+                "note": "whichever key is present is used; swapping "
+                        "providers is a secret change, not a code change"}
+
+    @web_app.post("/api/debug/search")
+    async def debug_search(query: str, max_results: int = 5,
+                           model: str = "claude-sonnet-5"):
+        """Search plus the token cost of its result block — that block is
+        re-sent on every subsequent loop iteration."""
+        from agents.common.search import web_search, format_for_model
+        from harness.adapters.anthropic_adapter import AnthropicAdapter
+
+        payload = await web_search(query, max_results=max_results)
+        rendered = format_for_model(payload)
+
+        tokens = None
+        try:
+            tokens = await AnthropicAdapter().count_tokens(
+                model=model,
+                messages=[{"role": "user", "content": rendered}])
+        except Exception:
+            pass
+
+        return {"provider": payload.get("provider"), "ok": payload.get("ok"),
+                "error": payload.get("error"),
+                "result_count": len(payload.get("results", [])),
+                "tiers": {t: sum(1 for r in payload.get("results", [])
+                                 if r["tier"] == t)
+                          for t in ("primary", "secondary", "tertiary")},
+                "rendered_tokens": tokens,
+                "rendered": rendered,
+                "raw": payload.get("results", [])}
+
+    # ── T4.2 — fetch with extract-then-discard ────────────────────────────
+    @web_app.post("/api/debug/fetch")
+    async def debug_fetch(url: str, purpose: str = "general legal research",
+                          user_id: str = "kartik",
+                          model: str = "claude-sonnet-5"):
+        """Shows the saving directly: full page size vs what reaches context."""
+        from agents.common.fetch import fetch_and_extract, format_for_model
+        from anthropic import AsyncAnthropic
+        from harness.adapters.anthropic_adapter import AnthropicAdapter
+
+        c = worker_client(user_id)
+        t0 = time.perf_counter()
+        r = await fetch_and_extract(worker=c, url=url, purpose=purpose,
+                                    client=AsyncAnthropic())
+        ms = int((time.perf_counter() - t0) * 1000)
+        rendered = format_for_model(r)
+
+        adapter = AnthropicAdapter()
+        try:
+            ctx_tokens = await adapter.count_tokens(
+                model=model, messages=[{"role": "user", "content": rendered}])
+        except Exception:
+            ctx_tokens = None
+
+        # MEASURE the naive baseline, don't estimate it. chars//4 badly
+        # under-counts legal text — citations, section symbols and
+        # capitalised defined terms all tokenise poorly — which would make
+        # every reduction figure look worse than it is AND be indefensible
+        # under questioning.
+        full_chars = r.get("total_chars", 0)
+        naive_tokens = 0
+        if full_chars:
+            try:
+                cached = c.call("read_cached",
+                                {"handle": r.get("handle"),
+                                 "max_chars": 200000})
+                page_text = (cached.get("result") or {}).get("text", "")
+                if page_text:
+                    naive_tokens = await adapter.count_tokens(
+                        model=model,
+                        messages=[{"role": "user", "content": page_text}])
+            except Exception:
+                naive_tokens = full_chars // 4      # fallback estimate
+
+        return {
+            "ms": ms,
+            "confidence": r.get("confidence"),
+            "verified_quotes": len(r.get("verified_quotes") or []),
+            "discarded_quotes": len(r.get("unverified_quotes") or []),
+            "extraction_usage": r.get("extraction_usage"),
+            # ⭐ THE COMPARISON. Naive = the whole page in context.
+            "full_page_chars": full_chars,
+            "naive_tokens_measured": naive_tokens,
+            "tokens_into_context": ctx_tokens,
+            "reduction_x": (round(naive_tokens / ctx_tokens, 1)
+                            if ctx_tokens and naive_tokens else None),
+            "cost_at_6_iterations": {
+                "naive": naive_tokens * 6,
+                "ours": (ctx_tokens or 0) * 6,
+            },
+            "rendered": rendered,
+        }
 
     # ── T3.5 — document extraction ────────────────────────────────────────
     # Untrusted-content wrapper. File contents are DATA, never instructions.

@@ -142,6 +142,11 @@ async def run_turn(
                     kind=out.payload.get("kind", call.name),
                     payload=out.payload)
 
+            # Forward anything the tool produced. The loop does not inspect
+            # these — citations are an agent concern, not a harness one.
+            for extra in (out.events or []):
+                yield extra
+
             results.append(ToolResult(call_id=call.id, name=call.name,
                                       content=out.content, ok=out.ok))
 

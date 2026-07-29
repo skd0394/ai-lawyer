@@ -22,6 +22,10 @@ class ToolOut:
     content: str = ""              # what the MODEL sees
     summary: str = ""              # short label for the UI chip
     payload: dict | None = None    # structured block for the UI (Agent B)
+    # Events the tool wants forwarded to the client (e.g. citations).
+    # The loop forwards these blindly — it never inspects them, so the
+    # harness stays law-agnostic while agents emit domain-specific events.
+    events: list = field(default_factory=list)
 
 
 @dataclass

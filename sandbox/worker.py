@@ -171,6 +171,167 @@ def op_stat(args: dict) -> dict:
     return {"exists": True, "bytes": st.st_size, "modified": st.st_mtime}
 
 
+# ── SSRF guard ────────────────────────────────────────────────────────────
+# A jailbroken agent asking for http://169.254.169.254/ (cloud metadata) or
+# http://localhost:8000/ must be stopped BEFORE the request goes out.
+# Checked after DNS resolution, because a hostile hostname can resolve to a
+# private address.
+BLOCKED_SCHEMES = ("file", "ftp", "gopher", "data")
+
+
+def _check_url(url: str) -> str:
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    u = urlparse(url)
+    if u.scheme.lower() in BLOCKED_SCHEMES or u.scheme.lower() not in ("http", "https"):
+        raise PathError(f"scheme not allowed: {u.scheme}")
+    host = u.hostname
+    if not host:
+        raise PathError("no host in URL")
+    if host.lower() in ("localhost", "metadata.google.internal"):
+        raise PathError(f"blocked host: {host}")
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception as e:
+        raise PathError(f"cannot resolve {host}: {e}")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast):
+            raise PathError(f"blocked address {ip} for host {host}")
+    return url
+
+
+def op_fetch_url(args: dict) -> dict:
+    """Fetch a URL, strip boilerplate, cache the full text, return it.
+
+    Runs in the SANDBOX: arbitrary user-influenced URLs belong in the
+    isolated container, not in the process holding the API keys.
+
+    The full text is written to cache/ and NEVER goes into the model's
+    context — the caller passes it to a cheap model for relevance
+    extraction and discards it.
+    """
+    import hashlib
+    import httpx
+
+    url = _check_url(args["url"])
+    max_bytes = int(args.get("max_bytes", 3_000_000))
+    max_chars = int(args.get("max_chars", 60000))
+
+    # Pin the CA bundle explicitly. Modal sets SSL_CERT_DIR in the sandbox
+    # env, and if it points somewhere without certs every HTTPS request
+    # dies with CERTIFICATE_VERIFY_FAILED.
+    try:
+        import ssl
+        import certifi
+        ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        ssl_ctx = True          # fall back to httpx's default
+
+    # Some government sites are slow or reject unfamiliar user agents.
+    # One retry with a browser UA before giving up.
+    attempts = [
+        ("Mozilla/5.0 (compatible; LegalResearchBot/1.0)", 25),
+        ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+         "(KHTML, like Gecko) Chrome/122.0 Safari/537.36", 30),
+    ]
+    last_err = None
+    for ua, timeout_s in attempts:
+        try:
+            with httpx.Client(timeout=timeout_s, follow_redirects=True,
+                              verify=ssl_ctx,
+                              headers={"User-Agent": ua,
+                                       "Accept": "text/html,application/xhtml+xml,"
+                                                 "application/pdf,*/*"}) as c:
+                r = c.get(url)
+                status = r.status_code
+                final_url = str(r.url)
+                ctype = (r.headers.get("content-type") or "").lower()
+                raw = r.content[:max_bytes]
+            last_err = None
+            break
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+    if last_err:
+        return {"fetched": False, "url": url, "error": last_err}
+
+    if status >= 400:
+        return {"fetched": False, "url": url, "status": status,
+                "error": f"HTTP {status}"}
+
+    title = ""
+    # Content-type sniffing: legal sources serve PDFs from .html URLs
+    # surprisingly often.
+    if "pdf" in ctype or raw[:5] == b"%PDF-":
+        import fitz
+        doc = fitz.open(stream=raw, filetype="pdf")
+        text = "\n\n".join(f"## Page {i+1}\n\n{p.get_text().strip()}"
+                             for i, p in enumerate(doc) if p.get_text().strip())
+        title = (doc.metadata or {}).get("title") or url.rsplit("/", 1)[-1]
+        doc.close()
+        kind = "pdf"
+    else:
+        import trafilatura
+        html = raw.decode("utf-8", "replace")
+        text = trafilatura.extract(
+            html, output_format="markdown", include_links=False,
+            include_comments=False, include_tables=True) or ""
+        try:
+            md = trafilatura.extract_metadata(html)
+            title = (md.title if md else "") or ""
+        except Exception:
+            pass
+        if not title:
+            import re as _re
+            m = _re.search(r"<title[^>]*>(.*?)</title>", html,
+                           _re.I | _re.S)
+            title = (m.group(1).strip() if m else final_url)[:200]
+        kind = "html"
+
+    text = text.strip()
+    if not text:
+        return {"fetched": False, "url": url, "status": status,
+                "error": "no extractable text (JS-rendered or empty page)"}
+
+    handle = hashlib.sha256(final_url.encode()).hexdigest()[:16]
+    os.makedirs(os.path.join(CACHE, "fetch"), exist_ok=True)
+    with open(os.path.join(CACHE, "fetch", f"{handle}.md"), "w",
+              encoding="utf-8") as f:
+        f.write(f"# {title}\nSOURCE: {final_url}\n\n{text}")
+
+    return {"fetched": True, "url": url, "final_url": final_url,
+            "status": status, "kind": kind, "title": title,
+            "handle": handle, "total_chars": len(text),
+            "text": text[:max_chars],
+            "text_truncated": len(text) > max_chars}
+
+
+def op_read_cached(args: dict) -> dict:
+    """Retrieve part of a previously fetched page by handle."""
+    handle = args["handle"]
+    path = os.path.join(CACHE, "fetch", f"{handle}.md")
+    if not os.path.exists(path):
+        return {"found": False, "error": f"no cached page for handle {handle}"}
+    with open(path, encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    section = args.get("section")
+    if section:
+        from extract import _section
+        body = _section(text, section)
+        if not body:
+            heads = [l for l in text.splitlines() if l.startswith("#")]
+            return {"found": True, "text": "",
+                    "error": f"no section '{section}'",
+                    "available": heads[:25]}
+        text = body
+    limit = int(args.get("max_chars", 8000))
+    return {"found": True, "text": text[:limit],
+            "truncated": len(text) > limit, "total_chars": len(text)}
+
+
 def op_extract(args: dict) -> dict:
     """Extract a document to markdown. Heavy imports (pymupdf, python-docx,
     openpyxl) live inside extract.py and are only pulled in here — the API
@@ -188,6 +349,8 @@ def op_extract(args: dict) -> dict:
 
 OPS = {
     "extract": op_extract,
+    "fetch_url": op_fetch_url,
+    "read_cached": op_read_cached,
     "ping": op_ping,
     "env_check": op_env_check,
     "ensure_dirs": op_ensure_dirs,

@@ -58,3 +58,23 @@ model_ms: 7592 vs tool_ms: 151. 98% of wall-clock is the model. Record it, becau
 
 important:
 editing worker.py requires killing the sandbox, not just redeploying. Add it to your notes.
+
+T3.5 — Document extraction
+
+The biggest task of the day, and the one DocDraft explicitly said they want your opinion on:
+
+"The agent can read uploaded documents: text PDFs, scanned PDFs (OCR), DOCX, spreadsheets, images. How the content actually reaches the model (pre-extraction, on-demand tools, native multimodal) is a design decision, and honestly one we're interested in seeing your take on."
+
+Your answer — and be ready to defend it:
+
+"On-demand tools with outline-first reads and hard per-call caps. At session start the model sees a manifest — filename, type, size — costing about 15 tokens per file. Nothing else. When it needs content it calls read_document, which by default returns an outline (~200 tokens), and only then reads a specific section. Extraction runs in the sandbox; native multimodal is used only for images and scanned pages, where there's no text to extract."
+
+On T3.6 — you don't need it
+
+The planned LLM proxy existed so sandbox-side tools could reach a model without holding a key. But the OCR design moved that call to the API process: the sandbox produces pixels, the orchestrator transcribes them. There is now no sandbox-side LLM need at all.
+
+That's a better outcome than building the proxy. Write it up as a decision:
+
+"Rather than proxying LLM access into the sandbox, I arranged the trust boundary so the sandbox never needs a model. It extracts and rasterises; the orchestrator does all inference. The key isn't merely hidden from the sandbox — the sandbox has no reason to want it. A proxy would have been an attack surface protecting a capability nothing needed."
+
+If an evaluator pushes on it, the honest follow-up is: if a future tool genuinely needed sandbox-side inference, you'd mint short-lived HMAC tokens bound to user_id and add a /internal/llm endpoint — but you'd first ask whether the work could move orchestrator-side instead.

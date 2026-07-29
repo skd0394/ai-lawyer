@@ -171,7 +171,23 @@ def op_stat(args: dict) -> dict:
     return {"exists": True, "bytes": st.st_size, "modified": st.st_mtime}
 
 
+def op_extract(args: dict) -> dict:
+    """Extract a document to markdown. Heavy imports (pymupdf, python-docx,
+    openpyxl) live inside extract.py and are only pulled in here — the API
+    container imports this module for its source and must not need them."""
+    from extract import extract
+    full = safe_path(args["path"], areas=("uploads", "outputs", "cache"))
+    return extract(
+        full,
+        mode=args.get("mode", "outline"),
+        section=args.get("section"),
+        max_chars=int(args.get("max_chars", 8000)),
+        want_images=bool(args.get("want_images", False)),
+    )
+
+
 OPS = {
+    "extract": op_extract,
     "ping": op_ping,
     "env_check": op_env_check,
     "ensure_dirs": op_ensure_dirs,
@@ -203,6 +219,7 @@ def dispatch(req: dict) -> dict:
 
 
 def serve() -> None:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     op_ensure_dirs({})
     log(f"worker ready pid={os.getpid()}")
     for line in sys.stdin:
@@ -222,6 +239,7 @@ def serve() -> None:
 
 def once(b64_req: str) -> None:
     """Fallback path: python worker.py --once <base64-json>."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     op_ensure_dirs({})
     req = json.loads(base64.b64decode(b64_req).decode())
     sys.stdout.write(json.dumps(dispatch(req), default=str) + "\n")

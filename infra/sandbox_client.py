@@ -24,7 +24,9 @@ import time
 import uuid
 from typing import Any
 
-WORKER_PATH = "/tmp/worker.py"
+WORKER_DIR = "/tmp/aw"
+WORKER_PATH = f"{WORKER_DIR}/worker.py"
+EXTRACT_PATH = f"{WORKER_DIR}/extract.py"
 
 # sandbox_id -> live worker, per API container.
 _WORKERS: dict[str, "PersistentWorker"] = {}
@@ -35,13 +37,21 @@ class WorkerUnavailable(Exception):
     pass
 
 
-def install_worker(sandbox, source: str) -> None:
-    """Push worker.py into the sandbox. base64 avoids every shell quoting
-    problem — the source contains quotes, newlines and backslashes."""
-    b64 = base64.b64encode(source.encode()).decode()
-    p = sandbox.exec("bash", "-c",
-                     f"echo '{b64}' | base64 -d > {WORKER_PATH} && "
-                     f"echo INSTALLED")
+def install_worker(sandbox, source: str, extract_source: str = "") -> None:
+    """Push worker.py (and extract.py) into the sandbox.
+
+    base64 avoids every shell quoting problem — the sources contain quotes,
+    newlines and backslashes.
+    """
+    wb = base64.b64encode(source.encode()).decode()
+    cmd = (f"mkdir -p {WORKER_DIR} && "
+           f"echo '{wb}' | base64 -d > {WORKER_PATH}")
+    if extract_source:
+        eb = base64.b64encode(extract_source.encode()).decode()
+        cmd += f" && echo '{eb}' | base64 -d > {EXTRACT_PATH}"
+    cmd += " && echo INSTALLED"
+
+    p = sandbox.exec("bash", "-c", cmd)
     p.wait()
     out = p.stdout.read()
     if "INSTALLED" not in out:
@@ -98,9 +108,11 @@ class PersistentWorker:
 
 
 class SandboxClient:
-    def __init__(self, sandbox, worker_source: str):
+    def __init__(self, sandbox, worker_source: str,
+                 extract_source: str = ""):
         self.sandbox = sandbox
         self.source = worker_source
+        self.extract_source = extract_source
         self.sandbox_id = getattr(sandbox, "object_id", str(id(sandbox)))
         self.transport = "unknown"
 
@@ -109,7 +121,8 @@ class SandboxClient:
             w = _WORKERS.get(self.sandbox_id)
             if w is not None and not w.dead:
                 return w
-            install_worker(self.sandbox, self.source)
+            install_worker(self.sandbox, self.source,
+                           self.extract_source)
             w = PersistentWorker(self.sandbox)
             _WORKERS[self.sandbox_id] = w
             return w
@@ -117,10 +130,8 @@ class SandboxClient:
     def _oneshot(self, op: str, args: dict, timeout: int = 60) -> dict:
         b64 = base64.b64encode(
             json.dumps({"id": "1", "op": op, "args": args}).encode()).decode()
+        install_worker(self.sandbox, self.source, self.extract_source)
         p = self.sandbox.exec("bash", "-c",
-                              f"test -f {WORKER_PATH} || "
-                              f"(echo '{base64.b64encode(self.source.encode()).decode()}' "
-                              f"| base64 -d > {WORKER_PATH}); "
                               f"python {WORKER_PATH} --once {b64}")
         p.wait()
         out = (p.stdout.read() or "").strip()
@@ -154,12 +165,13 @@ class SandboxClient:
         return r["result"]
 
 
-def worker_source() -> str:
-    """Read worker.py's own source so it can be pushed into the sandbox.
+def worker_source() -> tuple[str, str]:
+    """Read worker.py and extract.py source so they can be pushed in.
 
-    Importing is safe: every heavy import in that module is lazy, and the
+    Importing is safe: every heavy import in those modules is lazy, and the
     serve loop is behind `if __name__ == '__main__'`.
     """
     from pathlib import Path
     import sandbox.worker as w
-    return Path(w.__file__).read_text()
+    import sandbox.extract as e
+    return Path(w.__file__).read_text(), Path(e.__file__).read_text()

@@ -47,6 +47,7 @@ static prefix       =     89%
 
 limitations.md
 **acquire() is not atomic.**
+**Stated limitation for LIMITATIONS.md: appending rewrites the whole turns.jsonl, so writes are O(session length). Fine at realistic sizes — a 50-turn session is well under a megabyte — but not how you'd build it for thousands of turns.**
 
 Two consequences. For Day 6, the UI must switch to "Cancelling…" the instant the button is clicked rather than waiting for turn_end, or it looks broken. For your writeup, this is a deliberate tradeoff worth stating: "I check cancellation only at iteration boundaries. Aborting mid-stream would leave a tool_use block without its tool_result and permanently corrupt the session. I accepted up to one iteration of latency to guarantee the session stays replayable." That's the kind of answer that separates a considered design from a lucky one.
 
@@ -54,3 +55,6 @@ Two consequences. For Day 6, the UI must switch to "Cancelling…" the instant t
 model_ms: 7592 vs tool_ms: 151. 98% of wall-clock is the model. Record it, because it should invert meaningfully on Day 4 once web_fetch and its Haiku extraction call enter the picture — and the shift between these two numbers is how you'll explain your latency profile on Day 7.
 
 **are my prices/rates real?**
+
+important:
+editing worker.py requires killing the sandbox, not just redeploying. Add it to your notes.

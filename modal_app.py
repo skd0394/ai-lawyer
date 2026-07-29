@@ -34,7 +34,7 @@ api_image = (
     # pip_install — Modal requires local layers last. Without this you get
     # ModuleNotFoundError: no module named 'harness' at runtime, because
     # Modal only auto-mounts the entrypoint file, not your packages.
-    .add_local_python_source("harness", "infra", "obs")
+    .add_local_python_source("harness", "infra", "obs", "sandbox")
 )
 
 sandbox_image = (
@@ -91,8 +91,13 @@ def get_or_create_sandbox(user_id: str):
             sb = modal.Sandbox.from_id(rec["sandbox_id"])
             # poll() is None => still running. Anything else => it died.
             if sb.poll() is None:
-                sandbox_registry[uid] = {**rec, "last_used_at": time.time()}
+                sandbox_registry[uid] = {**rec, "last_used_at": time.time(),
+                                         "uses": rec.get("uses", 0) + 1}
                 return sb, True
+            # It died (hit the 40 min ceiling, or was reaped). Drop the
+            # stale entry so the next request doesn't pay a lookup to
+            # rediscover the same corpse.
+            del sandbox_registry[uid]
         except Exception:
             pass  # stale id; fall through and make a fresh one
 
@@ -120,8 +125,64 @@ def get_or_create_sandbox(user_id: str):
         "sandbox_id": sb.object_id,
         "created_at": time.time(),
         "last_used_at": time.time(),
+        "uses": 1,
     }
     return sb, False
+
+
+# ── T3.2 — idle reaper ────────────────────────────────────────────────────
+# Modal enforces the 40-minute HARD timeout for us. The 2-minute IDLE
+# timeout is ours to build: Modal has no idea whether a sandbox is idle,
+# only we know when it was last used. Without this, an abandoned sandbox
+# burns compute for the full 40 minutes — on DocDraft's account.
+#
+# MERN analogy: a connection pool's idle-eviction thread.
+@app.function(image=api_image, schedule=modal.Period(minutes=1), timeout=120)
+def reap_idle_sandboxes() -> dict:
+    now = time.time()
+    reaped, kept, errors = [], [], []
+
+    try:
+        uids = list(sandbox_registry.keys())
+    except Exception as e:
+        return {"error": f"cannot enumerate registry: {e}"}
+
+    for uid in uids:
+        rec = sandbox_registry.get(uid)
+        if not rec:
+            continue
+        idle = now - rec.get("last_used_at", 0)
+        age = now - rec.get("created_at", 0)
+
+        try:
+            sb = modal.Sandbox.from_id(rec["sandbox_id"])
+            alive = sb.poll() is None
+        except Exception as e:
+            errors.append({"user_id": uid, "error": str(e)})
+            del sandbox_registry[uid]      # unresolvable id, drop it
+            continue
+
+        if not alive:
+            # Modal already killed it (40 min ceiling). Clean the entry.
+            del sandbox_registry[uid]
+            reaped.append({"user_id": uid, "reason": "already_dead",
+                           "age_s": int(age)})
+            continue
+
+        if idle > IDLE_TIMEOUT_S:
+            try:
+                sb.terminate()
+            except Exception as e:
+                errors.append({"user_id": uid, "error": str(e)})
+            del sandbox_registry[uid]
+            reaped.append({"user_id": uid, "reason": "idle",
+                           "idle_s": int(idle), "age_s": int(age),
+                           "uses": rec.get("uses", 0)})
+        else:
+            kept.append({"user_id": uid, "idle_s": int(idle),
+                         "age_s": int(age), "uses": rec.get("uses", 0)})
+
+    return {"at": now, "reaped": reaped, "kept": kept, "errors": errors}
 
 
 def sh(sb, command: str, timeout: int = 30) -> dict:
@@ -963,7 +1024,21 @@ def fastapi_app():
 
         tracer = Tracer(turn_id=turn_id, session_id=req.session_id,
                         user_id=req.user_id, agent=req.agent)
-        messages: list[dict] = [{"role": "user", "content": req.prompt}]
+
+        # ── T3.1: rebuild context from the volume ─────────────────────────
+        # This is what makes turn N remember turn 1 — even if the sandbox
+        # that served turn 1 was destroyed hours ago. The model holds no
+        # state; the volume is the source of truth.
+        from harness.session import rebuild_messages, validate_messages
+        from infra.session_store import SessionStore, make_turn_record
+
+        store = SessionStore(req.user_id, req.session_id)
+        prior_turns = store.read_turns()
+        history = rebuild_messages(prior_turns)      # repairs orphans too
+
+        messages: list[dict] = history + [
+            {"role": "user", "content": req.prompt}]
+        turn_start_index = len(history)              # slice out THIS turn later
 
         async def event_stream():
             # Producer/consumer rather than a direct `async for`. This is
@@ -1017,6 +1092,25 @@ def fastapi_app():
                 # Without it, closing the tab locks the user out until the
                 # 15-minute stale timeout.
                 task.cancel()
+
+                # Persist whatever this turn produced, even if it was
+                # cancelled or died. A partial turn is still valid history
+                # because the loop only ever appends complete message pairs
+                # (and rebuild_messages repairs anything it missed).
+                try:
+                    new_messages = messages[turn_start_index:]
+                    if len(new_messages) > 1:        # more than just the prompt
+                        store.append_turn(make_turn_record(
+                            turn_id=turn_id,
+                            prompt=req.prompt,
+                            messages=new_messages,
+                            stop_reason=tracer.stop_reason,
+                            usage=tracer.totals,
+                            agent=req.agent,
+                        ))
+                except Exception as e:
+                    print(f"session persist failed: {e}")
+
                 locks.release(req.user_id)
                 try:
                     tracer.finish()
@@ -1044,6 +1138,237 @@ def fastapi_app():
         EventSource, because EventSource cannot POST."""
         from fastapi.responses import HTMLResponse
         return HTMLResponse(DEBUG_HTML)
+
+    # ── T3.1 — session retrieval ──────────────────────────────────────────
+    @web_app.get("/api/sessions/{session_id}/transcript")
+    def get_transcript(session_id: str, user_id: str = "kartik"):
+        """Spec: 'Session history is retrievable as a full ordered
+        transcript, so the UI can rehydrate after a reload or a dropped
+        connection.'"""
+        from harness.session import transcript, rebuild_messages, count_context
+        from infra.session_store import SessionStore
+
+        store = SessionStore(user_id, session_id)
+        turns = store.read_turns()
+        msgs = rebuild_messages(turns)
+        return {
+            "session_id": session_id,
+            "turn_count": len(turns),
+            "message_count": len(msgs),
+            "context_chars": count_context(msgs),
+            "transcript": transcript(turns),
+        }
+
+    @web_app.get("/api/sessions/{session_id}/messages")
+    def get_raw_messages(session_id: str, user_id: str = "kartik"):
+        """Raw rebuilt message array — what actually gets sent to the model.
+        For debugging context growth."""
+        from harness.session import rebuild_messages, validate_messages
+        from infra.session_store import SessionStore
+
+        turns = SessionStore(user_id, session_id).read_turns()
+        msgs = rebuild_messages(turns)
+        return {"messages": msgs, "integrity": validate_messages(msgs)}
+
+    # ── T3.3 — sandbox worker (JSONL-RPC) ─────────────────────────────────
+    def worker_client(user_id: str):
+        from infra.sandbox_client import SandboxClient, worker_source
+        sb, _ = get_or_create_sandbox(user_id)
+        return SandboxClient(sb, worker_source())
+
+    @web_app.post("/api/debug/worker/selftest")
+    def worker_selftest(user_id: str = "kartik"):
+        """Exercise the worker protocol and prove path safety in code.
+
+        Also re-verifies credential isolation FROM INSIDE the sandbox —
+        which is the perspective that matters, since that's where a
+        jailbroken agent would be looking.
+        """
+        c = worker_client(user_id)
+        cases = []
+
+        def case(name, op, args, expect_ok=True):
+            t0 = time.perf_counter()
+            r = c.call(op, args)
+            ms = int((time.perf_counter() - t0) * 1000)
+            cases.append({
+                "case": name, "op": op, "ok": r.get("ok"),
+                "expected_ok": expect_ok, "pass": r.get("ok") is expect_ok,
+                "ms": ms,
+                "result": r.get("result") if r.get("ok") else r.get("error"),
+            })
+            return r
+
+        case("ping", "ping", {})
+        case("ensure dirs", "ensure_dirs", {})
+        case("write to outputs", "write_text",
+             {"path": "outputs/worker_test.txt", "text": "hello from worker"})
+        w = case("read it back", "read_text", {"path": "outputs/worker_test.txt"})
+        # Paths returned to the model/UI must be clean relative paths, never
+        # the resolved /__modal/volumes/vo-.../ form.
+        wpath = str((cases[-2].get("result") or {}).get("path", ""))
+        cases.append({"case": "returned path is clean relative",
+                      "pass": wpath.startswith("outputs/")
+                              and "__modal" not in wpath,
+                      "result": wpath})
+        case("list uploads", "list_dir", {"area": "uploads"})
+        case("stat missing file", "stat", {"path": "outputs/nope.txt"})
+
+        # Path safety — enforced in worker.py code, not by a prompt.
+        # Each of these must fail with PathError, NOT FileNotFoundError.
+        # A "rejection" that is really just a missing file proves nothing.
+        for label, bad in [
+            ("reject ../../etc/passwd", "../../etc/passwd"),
+            ("reject absolute /etc/passwd", "/etc/passwd"),
+            ("reject uploads/../../etc/passwd", "uploads/../../etc/passwd"),
+            ("reject sneaky ./../../etc/hosts", "./../../etc/hosts"),
+        ]:
+            r = case(label, "read_text", {"path": bad}, expect_ok=False)
+            cases[-1]["rejected_by_path_check"] = str(
+                r.get("error", "")).startswith("PathError")
+            cases[-1]["pass"] = (cases[-1]["pass"]
+                                 and cases[-1]["rejected_by_path_check"])
+
+        case("reject write to uploads", "write_text",
+             {"path": "uploads/evil.txt", "text": "x"}, expect_ok=False)
+
+        env = case("env check", "env_check", {})
+        env_res = env.get("result") or {}
+        cases.append({
+            "case": "NO CREDENTIALS IN SANDBOX",
+            "pass": not env_res.get("suspicious_keys"),
+            "result": {"suspicious_keys": env_res.get("suspicious_keys"),
+                       "env_var_count": env_res.get("env_var_count")},
+        })
+
+        return {
+            "transport": c.transport,
+            "passed": sum(1 for x in cases if x.get("pass")),
+            "total": len(cases),
+            "all_passed": all(x.get("pass") for x in cases),
+            "cases": cases,
+        }
+
+    @web_app.post("/api/debug/worker/bench")
+    def worker_bench(user_id: str = "kartik", n: int = 10):
+        """Per-call cost of the persistent worker vs the one-shot fallback.
+
+        The gap is why T3.3 exists: read_document has to import pymupdf,
+        and paying that on every call would dominate tool latency.
+        """
+        from infra.sandbox_client import SandboxClient, worker_source
+        sb, _ = get_or_create_sandbox(user_id)
+        c = SandboxClient(sb, worker_source())
+
+        c.call("ping", {})                     # warm the process
+        t0 = time.perf_counter()
+        for _ in range(n):
+            c.call("ping", {})
+        persistent_ms = (time.perf_counter() - t0) * 1000 / n
+
+        t1 = time.perf_counter()
+        for _ in range(3):
+            c._oneshot("ping", {})
+        oneshot_ms = (time.perf_counter() - t1) * 1000 / 3
+
+        t2 = time.perf_counter()
+        for _ in range(3):
+            sh(sb, "echo hi")
+        raw_exec_ms = (time.perf_counter() - t2) * 1000 / 3
+
+        return {
+            "transport": c.transport,
+            "persistent_ms_per_call": round(persistent_ms, 1),
+            "oneshot_ms_per_call": round(oneshot_ms, 1),
+            "raw_sh_ms_per_call": round(raw_exec_ms, 1),
+            "speedup_vs_oneshot": round(oneshot_ms / max(persistent_ms, 0.1), 1),
+        }
+
+    @web_app.get("/api/debug/sandboxes")
+    def list_sandboxes():
+        """What the registry believes, and whether it's true."""
+        out = []
+        now = time.time()
+        try:
+            uids = list(sandbox_registry.keys())
+        except Exception as e:
+            return {"error": str(e)}
+        for uid in uids:
+            rec = sandbox_registry.get(uid) or {}
+            try:
+                alive = modal.Sandbox.from_id(rec["sandbox_id"]).poll() is None
+            except Exception:
+                alive = None
+            out.append({
+                "user_id": uid,
+                "sandbox_id": rec.get("sandbox_id"),
+                "alive": alive,
+                "idle_s": int(now - rec.get("last_used_at", 0)),
+                "age_s": int(now - rec.get("created_at", 0)),
+                "uses": rec.get("uses", 0),
+                "will_reap_in_s": max(
+                    0, int(IDLE_TIMEOUT_S - (now - rec.get("last_used_at", 0)))),
+            })
+        return {"idle_timeout_s": IDLE_TIMEOUT_S,
+                "hard_timeout_s": SANDBOX_TIMEOUT_S, "sandboxes": out}
+
+    @web_app.post("/api/debug/reap")
+    def trigger_reap():
+        """Run the reaper on demand instead of waiting for the schedule."""
+        return reap_idle_sandboxes.local()
+
+    @web_app.post("/api/debug/sandbox/benchmark")
+    def sandbox_benchmark(user_id: str = "benchmark"):
+        """Measure cold vs warm acquisition — Day 7 needs both numbers.
+
+        Cold here means 'sandbox creation', not 'container image build'.
+        The very first run after changing sandbox_image includes the build
+        and is not representative; run it twice.
+        """
+        uid = _safe_user_id(user_id)
+        rec = sandbox_registry.get(uid)
+        if rec:
+            try:
+                modal.Sandbox.from_id(rec["sandbox_id"]).terminate()
+            except Exception:
+                pass
+            del sandbox_registry[uid]
+
+        t0 = time.perf_counter()
+        sb, reused_cold = get_or_create_sandbox(uid)
+        cold_ms = int((time.perf_counter() - t0) * 1000)
+
+        t1 = time.perf_counter()
+        _, reused_warm = get_or_create_sandbox(uid)
+        warm_ms = int((time.perf_counter() - t1) * 1000)
+
+        t2 = time.perf_counter()
+        sh(sb, "echo ok")
+        exec_ms = int((time.perf_counter() - t2) * 1000)
+
+        try:
+            modal.Sandbox.from_id(
+                sandbox_registry[uid]["sandbox_id"]).terminate()
+            del sandbox_registry[uid]
+        except Exception:
+            pass
+
+        return {
+            "cold_acquire_ms": cold_ms,
+            "cold_was_reused": reused_cold,
+            "warm_acquire_ms": warm_ms,
+            "warm_was_reused": reused_warm,
+            "single_exec_ms": exec_ms,
+            "speedup": round(cold_ms / max(warm_ms, 1), 1),
+        }
+
+    @web_app.get("/api/debug/storage")
+    def storage_diagnostics(user_id: str = "kartik",
+                            session_id: str = "diag"):
+        """Which Volume operations work in THIS Modal version. Run this
+        first — if write/read fail, nothing else today will work."""
+        from infra.session_store import SessionStore
+        return SessionStore(user_id, session_id).diagnostics()
 
     @web_app.get("/api/trace/{turn_id}")
     def get_trace(turn_id: str):

@@ -78,6 +78,41 @@ def safe_path(path: str, areas: tuple[str, ...] = ("uploads", "outputs")) -> str
     return full
 
 
+def resolve_read_path(name: str) -> str:
+    """Resolve a filename for READING, searching uploads/ then outputs/.
+
+    The agent should not have to know the directory layout. "the file
+    called X" means "find X". Without this, a document the agent just
+    wrote to outputs/ is unreachable by its own name — which cost a real
+    turn 46k tokens of retrying before it gave up and started over.
+
+    WRITES are deliberately NOT resolved this way: they stay pinned to
+    outputs/, which is what keeps uploads/ immutable.
+    """
+    n = (name or "").replace("\\", "/").strip()
+    if any(n.startswith(pfx) for pfx in
+           ("uploads/", "outputs/", "cache/", "sessions/")):
+        return safe_path(n, areas=("uploads", "outputs", "cache"))
+
+    for area in ("uploads", "outputs"):
+        try:
+            cand = safe_path(f"{area}/{n}", areas=("uploads", "outputs"))
+        except PathError:
+            continue
+        if os.path.exists(cand):
+            return cand
+
+    available = []
+    for area in ("uploads", "outputs"):
+        d = os.path.join(DATA_REAL, area)
+        if os.path.isdir(d):
+            available += [f"{area}/{f}" for f in sorted(os.listdir(d))
+                          if os.path.isfile(os.path.join(d, f))]
+    raise PathError(
+        f"no file named '{name}'. Available: "
+        + (", ".join(available) if available else "(none)"))
+
+
 def rel(full: str) -> str:
     """Path relative to the volume root, for anything the model or the UI
     will see. Never expose the resolved /__modal/... form."""
@@ -121,7 +156,7 @@ def op_list_dir(args: dict) -> dict:
 
 
 def op_read_text(args: dict) -> dict:
-    full = safe_path(args["path"], areas=("uploads", "outputs", "cache"))
+    full = resolve_read_path(args["path"])
     limit = int(args.get("max_chars", 20000))
     with open(full, "r", encoding="utf-8", errors="replace") as f:
         data = f.read(limit + 1)
@@ -164,7 +199,10 @@ def op_delete(args: dict) -> dict:
 
 
 def op_stat(args: dict) -> dict:
-    full = safe_path(args["path"], areas=("uploads", "outputs", "cache"))
+    try:
+        full = resolve_read_path(args["path"])
+    except PathError:
+        return {"exists": False}
     if not os.path.exists(full):
         return {"exists": False}
     st = os.stat(full)
@@ -355,12 +393,75 @@ def op_write_docx(args: dict) -> dict:
     return r
 
 
+def op_edit_docx(args: dict) -> dict:
+    """Revise an existing document into a NEW file in outputs/.
+
+    Reads from uploads/ OR outputs/; writes to outputs/ ONLY. The
+    "uploads are never mutated" requirement is enforced by safe_path's
+    areas argument, not by policy — there is no path that writes there.
+    """
+    from extract import extract
+    from docx_writer import markdown_to_docx, apply_edits, list_sections
+
+    src = resolve_read_path(args["source"])
+    src_hash_before = os.path.getsize(src), os.path.getmtime(src)
+
+    r = extract(src, mode="full", max_chars=1_000_000)
+    md = r.get("text") or ""
+    if not md:
+        return {"ok": False, "error": "could not read the source document"}
+
+    new_md, applied, failed = apply_edits(md, args.get("edits") or [])
+
+    out_name = os.path.basename(args.get("output") or
+                                f"revised-{os.path.basename(src)}")
+    if not out_name.lower().endswith(".docx"):
+        out_name = os.path.splitext(out_name)[0] + ".docx"
+    out_full = safe_path(f"outputs/{out_name}", areas=("outputs",))
+
+    res = markdown_to_docx(
+        md=new_md,
+        title=args.get("title") or os.path.splitext(
+            os.path.basename(src))[0].replace("-", " ").title(),
+        subtitle=args.get("subtitle", ""),
+        out_path=out_full,
+    )
+
+    # Prove the source is untouched rather than asserting it.
+    src_hash_after = os.path.getsize(src), os.path.getmtime(src)
+
+    res.update({
+        "ok": True,
+        "path": rel(out_full),
+        "filename": os.path.basename(out_full),
+        "source": rel(src),
+        "source_unmodified": src_hash_before == src_hash_after,
+        "edits_applied": applied,
+        "edits_failed": failed,
+        "sections": list_sections(new_md)[:40],
+        "words_before": len(md.split()),
+        "words_after": len(new_md.split()),
+    })
+    return res
+
+
+def op_list_sections(args: dict) -> dict:
+    """Section headings of a document, so the agent can target an edit
+    without reading the whole thing."""
+    from extract import extract
+    from docx_writer import list_sections
+
+    src = resolve_read_path(args["source"])
+    r = extract(src, mode="full", max_chars=1_000_000)
+    return {"source": rel(src), "sections": list_sections(r.get("text") or "")}
+
+
 def op_extract(args: dict) -> dict:
     """Extract a document to markdown. Heavy imports (pymupdf, python-docx,
     openpyxl) live inside extract.py and are only pulled in here — the API
     container imports this module for its source and must not need them."""
     from extract import extract
-    full = safe_path(args["path"], areas=("uploads", "outputs", "cache"))
+    full = resolve_read_path(args["path"])
     return extract(
         full,
         mode=args.get("mode", "outline"),
@@ -372,6 +473,8 @@ def op_extract(args: dict) -> dict:
 
 OPS = {
     "extract": op_extract,
+    "edit_docx": op_edit_docx,
+    "list_sections": op_list_sections,
     "write_docx": op_write_docx,
     "fetch_url": op_fetch_url,
     "read_cached": op_read_cached,

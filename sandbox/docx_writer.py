@@ -24,6 +24,11 @@ import re
 # [PARTY A NAME], [DATE OF EXECUTION], [SECURITY DEPOSIT AMOUNT]
 PLACEHOLDER_RE = re.compile(r"\[([A-Z][A-Z0-9 _/\-.,'&]{1,60})\]")
 
+# Bump on every change to this file. Returned with every generated
+# document so you can tell at a glance whether the sandbox is running the
+# code you just wrote — stale workers otherwise look exactly like bugs.
+WRITER_VERSION = 2
+
 BODY_FONT = "Times New Roman"
 BODY_SIZE = 11
 
@@ -147,7 +152,7 @@ def markdown_to_docx(md: str, title: str, out_path: str,
                      subtitle: str = "") -> dict:
     from docx import Document
     from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.shared import Pt, Inches
+    from docx.shared import Pt, Inches, RGBColor
 
     doc = Document()
 
@@ -166,13 +171,17 @@ def markdown_to_docx(md: str, title: str, out_path: str,
         section.top_margin = Inches(1)
         section.bottom_margin = Inches(1)
 
-    # Title block
-    tp = doc.add_paragraph()
+    # Title block. add_heading(level=0) applies Word's "Title" STYLE, which
+    # matters because extract.py reads styles back to reconstruct markdown.
+    # A bold run in a Normal paragraph looks identical on screen but is
+    # invisible to the round trip.
+    tp = doc.add_heading(title.upper(), level=0)
     tp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    tr = tp.add_run(title.upper())
-    tr.bold = True
-    tr.font.size = Pt(14)
-    tr.font.name = BODY_FONT
+    for tr in tp.runs:
+        tr.bold = True
+        tr.font.size = Pt(14)
+        tr.font.name = BODY_FONT
+        tr.font.color.rgb = RGBColor(0, 0, 0)   # Word's default is blue
     if subtitle:
         sp = doc.add_paragraph()
         sp.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -190,13 +199,21 @@ def markdown_to_docx(md: str, title: str, out_path: str,
                     and b["text"].strip().lower() == title.strip().lower()):
                 first_heading_skipped = True
                 continue
-            p = doc.add_paragraph()
+            # ⭐ add_heading, NOT add_paragraph + bold run.
+            # Heading STYLES are what make a document machine-readable:
+            # extract.py maps "Heading N" back to markdown "#" levels, which
+            # is what powers read_document(mode="section") and
+            # edit_document. Bold text in a Normal paragraph looks the same
+            # to a human and is invisible to the round trip — which silently
+            # broke draft-then-revise on every document the agent produced.
+            p = doc.add_heading(b["text"], level=b["level"])
             p.paragraph_format.space_before = Pt(12)
             p.paragraph_format.space_after = Pt(6)
-            r = p.add_run(b["text"])
-            r.bold = True
-            r.font.size = Pt(12 if b["level"] <= 2 else 11)
-            r.font.name = BODY_FONT
+            for r in p.runs:
+                r.bold = True
+                r.font.size = Pt(12 if b["level"] <= 2 else 11)
+                r.font.name = BODY_FONT
+                r.font.color.rgb = RGBColor(0, 0, 0)
 
         elif b["t"] == "p":
             p = doc.add_paragraph()
@@ -246,7 +263,17 @@ def markdown_to_docx(md: str, title: str, out_path: str,
     doc.save(out_path)
 
     placeholders = sorted(set(PLACEHOLDER_RE.findall(md)))
+
+    # Which paragraph styles actually landed in the file. If "Heading 1"
+    # is absent, headings were written as plain bold text and the document
+    # will NOT round-trip for section reads or edits.
+    styles_used = sorted({p.style.name for p in doc.paragraphs})
+
     return {
+        "writer_version": WRITER_VERSION,
+        "styles_used": styles_used,
+        "has_heading_styles": any(s.lower().startswith(("heading", "title"))
+                                  for s in styles_used),
         "path": out_path,
         "bytes": os.path.getsize(out_path),
         "word_count": len(re.sub(r"[#*|_-]", " ", md).split()),
@@ -255,3 +282,89 @@ def markdown_to_docx(md: str, title: str, out_path: str,
         "placeholders": [f"[{p}]" for p in placeholders],
         "placeholder_count": len(placeholders),
     }
+
+
+# ── section-scoped editing ────────────────────────────────────────────────
+# Why sections rather than whole-document rewrites: regenerating a
+# 3,764-word agreement to change one clause costs ~5,000 OUTPUT tokens
+# (~$0.075 at Sonnet rates), and output is the one thing prompt caching
+# cannot help with. A section edit is ~200 tokens. Same principle as
+# extract-then-discard, applied to the output side.
+
+def find_section_span(md: str, name: str) -> tuple[int, int, int] | None:
+    """Character span of a section: its heading through to the next heading
+    of the same or higher level. Returns (start, end, level)."""
+    want = (name or "").strip().lstrip("#").strip().lower()
+    if not want:
+        return None
+
+    heads = []
+    for m in re.finditer(r"^(#{1,6})[ \t]+(.+)$", md, re.M):
+        heads.append((m.start(), m.end(), len(m.group(1)), m.group(2).strip()))
+
+    for idx, (start, _end, level, text) in enumerate(heads):
+        norm = text.lower()
+        # Match on containment either way, so "Termination" finds
+        # "5. Termination" and "5. Termination" finds "Termination".
+        if want in norm or norm in want:
+            stop = len(md)
+            for nstart, _ne, nlevel, _nt in heads[idx + 1:]:
+                if nlevel <= level:
+                    stop = nstart
+                    break
+            return (start, stop, level)
+    return None
+
+
+def list_sections(md: str) -> list[str]:
+    return [m.group(2).strip()
+            for m in re.finditer(r"^(#{1,6})[ \t]+(.+)$", md, re.M)]
+
+
+def apply_edits(md: str, edits: list[dict]) -> tuple[str, list, list]:
+    """Apply section-scoped edits in order. Returns (new_md, applied, failed).
+
+    Failures are RETURNED, not raised — a bad section name should come back
+    to the model as something it can correct, along with the list of
+    sections that do exist.
+    """
+    applied, failed = [], []
+
+    for e in edits or []:
+        action = (e.get("action") or "replace").lower()
+        section = e.get("section") or ""
+        content = (e.get("content") or "").rstrip()
+
+        if action == "append_document":
+            md = md.rstrip() + "\n\n" + content + "\n"
+            applied.append({"action": action, "section": "(end of document)"})
+            continue
+
+        span = find_section_span(md, section)
+        if span is None:
+            failed.append({"action": action, "section": section,
+                           "reason": "no matching section",
+                           "available": list_sections(md)[:30]})
+            continue
+
+        start, end, _level = span
+        before, target, after = md[:start], md[start:end], md[end:]
+
+        if action == "replace":
+            md = before + content + "\n\n" + after
+        elif action in ("append_to_section", "insert_after"):
+            md = before + target.rstrip() + "\n\n" + content + "\n\n" + after
+        elif action == "delete":
+            md = before + after
+        else:
+            failed.append({"action": action, "section": section,
+                           "reason": f"unknown action '{action}'",
+                           "available": ["replace", "append_to_section",
+                                         "insert_after", "delete",
+                                         "append_document"]})
+            continue
+
+        applied.append({"action": action, "section": section,
+                        "chars_before": len(target), "chars_after": len(content)})
+
+    return md, applied, failed

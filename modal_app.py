@@ -566,9 +566,15 @@ def fastapi_app():
         }
 
     # ── T2.3 + T2.4 — registry + real loop ────────────────────────────────
-    def build_debug_registry():
-        """Toy registry to exercise the loop. Day 4 replaces this with
-        agents/agent_a/registry.py — the loop itself won't change."""
+    def build_debug_registry(include_test_tools: bool = False):
+        """Agent A's tool set.
+
+        include_test_tools adds broken_tool / slow_tool / big_tool /
+        halting_stub for the registry self-test. They are OFF by default:
+        every tool definition sits in the cached prefix and is re-sent on
+        every iteration of every turn, so four unused test tools cost ~250
+        tokens per turn for nothing.
+        """
         from harness.tools import ToolRegistry, ToolOut
 
         reg = ToolRegistry()
@@ -616,10 +622,8 @@ def fastapi_app():
                 section=args.get("section"),
             )
             if not r.get("ok"):
-                return ToolOut(
-                    ok=False, summary="cannot read",
-                    content=f"ERROR: could not read '{name}'. "
-                            f"Call list_files to see what exists.")
+                return ToolOut(ok=False, summary="cannot read",
+                               content=f"ERROR: {r.get('error')}")
             res = r["result"]
 
             if res.get("error"):
@@ -656,28 +660,6 @@ def fastapi_app():
             return ToolOut(content=wrapped,
                            summary=f"read {name}{tag} ({len(body)} chars)")
 
-        @reg.tool(name="read_file",
-                  description="Read one uploaded file. Call list_files first.",
-                  schema={"type": "object",
-                          "properties": {"name": {"type": "string"}},
-                          "required": ["name"]},
-                  max_result_chars=4000)
-        def _read(args, ctx):
-            fn = (args.get("name") or "").strip()
-            if not fn:
-                return ToolOut(ok=False, summary="no filename",
-                               content="ERROR: provide a filename.")
-            r = ctx["worker"].call("read_text",
-                                   {"path": fn, "max_chars": 8000})
-            if not r.get("ok"):
-                # Translate the error instead of forwarding it. Raw stderr
-                # would leak the internal filesystem layout and teach the
-                # model that paths are constructible.
-                return ToolOut(ok=False, summary="cannot read",
-                               content=f"ERROR: could not read '{fn}'. "
-                                       f"Call list_files to see what exists.")
-            res = r["result"]
-            return ToolOut(content=res["text"], summary=f"read {fn}")
 
         @reg.tool(
             name="web_search",
@@ -768,25 +750,17 @@ def fastapi_app():
         @reg.tool(
             name="write_document",
             description=(
-                "Write a legal document as a downloadable .docx. Supply the "
-                "body as MARKDOWN (## for clause headings, - for lists, | "
-                "for tables, ** for emphasis). For any detail you do not "
-                "have, insert a bracketed placeholder in capitals such as "
-                "[PARTY A NAME] and keep drafting — never stop to ask. The "
-                "placeholders are reported back to you afterwards."),
+                "Write a legal document as a downloadable .docx. Body is "
+                "MARKDOWN (## clause headings, - lists, | tables). For any "
+                "detail you lack, insert [CAPITAL PLACEHOLDERS] and keep "
+                "drafting; they are reported back to you."),
             schema={
                 "type": "object",
                 "properties": {
-                    "filename": {"type": "string",
-                                 "description": "e.g. operating-agreement.docx"},
-                    "title": {"type": "string",
-                              "description": "document title, e.g. "
-                                             "'LLC Operating Agreement'"},
-                    "subtitle": {"type": "string",
-                                 "description": "optional, e.g. "
-                                                "'Governed by Illinois law'"},
-                    "markdown": {"type": "string",
-                                 "description": "the full document body"},
+                    "filename": {"type": "string"},
+                    "title": {"type": "string"},
+                    "subtitle": {"type": "string"},
+                    "markdown": {"type": "string"},
                 },
                 "required": ["filename", "title", "markdown"],
             },
@@ -835,6 +809,102 @@ def fastapi_app():
                          "placeholders": res["placeholders"]},
             )
 
+
+        @reg.tool(
+            name="edit_document",
+            description=(
+                "Revise a document into a NEW file. Supply only the sections "
+                "you are changing, never the whole document. Get exact "
+                "heading names from read_document(mode='outline') first. "
+                "Uploads are never modified."),
+            schema={
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string"},
+                    "output": {"type": "string"},
+                    "title": {"type": "string"},
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["replace", "append_to_section",
+                                             "insert_after", "delete",
+                                             "append_document"],
+                                },
+                                "section": {"type": "string",
+                                            "description": "exact heading"},
+                                "content": {"type": "string",
+                                            "description": "markdown; include "
+                                                           "the heading line"},
+                            },
+                            "required": ["action"],
+                        },
+                    },
+                },
+                "required": ["source", "edits"],
+            },
+            max_result_chars=3000,
+            timeout=180,
+        )
+        def _edit_doc(args, ctx):
+            edits = args.get("edits") or []
+            if not edits:
+                return ToolOut(ok=False, summary="no edits",
+                               content="ERROR: supply at least one edit.")
+            r = ctx["worker"].call("edit_docx", {
+                "source": args.get("source", ""),
+                "output": args.get("output", ""),
+                "title": args.get("title", ""),
+                "edits": edits,
+            }, timeout=150)
+            if not r.get("ok"):
+                return ToolOut(ok=False, summary="edit failed",
+                               content=f"ERROR: {r.get('error')}")
+            res = r["result"]
+            if not res.get("ok"):
+                return ToolOut(ok=False, summary="edit failed",
+                               content=f"ERROR: {res.get('error')}")
+
+            lines = [
+                f"Revised document: {res['filename']} "
+                f"({res['words_before']} -> {res['words_after']} words)",
+                f"Download: /api/files/outputs/{res['filename']}"
+                f"?user_id={ctx['user_id']}",
+                f"Source '{res['source']}' was NOT modified: "
+                f"{res['source_unmodified']}",
+            ]
+            if res["edits_applied"]:
+                lines.append("\nApplied:")
+                lines += [f"  {a['action']}: {a['section']}"
+                          for a in res["edits_applied"]]
+            if res["edits_failed"]:
+                # Return failures to the model so it can correct itself.
+                lines.append("\nFAILED — fix and retry these:")
+                for f in res["edits_failed"]:
+                    lines.append(f"  {f['action']} '{f['section']}': "
+                                 f"{f['reason']}")
+                    if f.get("available"):
+                        lines.append(f"    sections that exist: "
+                                     f"{', '.join(f['available'][:15])}")
+            if res.get("placeholders"):
+                lines.append(f"\nPlaceholders remaining: "
+                             f"{', '.join(res['placeholders'])}")
+
+            ok = bool(res["edits_applied"]) and not res["edits_failed"]
+            return ToolOut(
+                ok=ok, content="\n".join(lines),
+                summary=f"{res['filename']}: {len(res['edits_applied'])} "
+                        f"applied, {len(res['edits_failed'])} failed",
+                payload={"kind": "document", "filename": res["filename"],
+                         "download_url": f"/api/files/outputs/{res['filename']}"
+                                         f"?user_id={ctx['user_id']}",
+                         "word_count": res["words_after"],
+                         "placeholders": res.get("placeholders", [])},
+            )
+
         @reg.tool(
             name="read_cached_page",
             description=(
@@ -873,6 +943,10 @@ def fastapi_app():
                            summary=f"cached page ({len(res['text'])} chars)")
 
         # ── Tools that exist only to prove the invariants ─────────────────
+        # Not registered for real turns: unused tool definitions are pure
+        # prefix cost, re-sent on every iteration.
+        if not include_test_tools:
+            return reg
 
         @reg.tool(name="broken_tool",
                   description="Deliberately broken. For testing only.",
@@ -928,7 +1002,7 @@ def fastapi_app():
         sb, _ = get_or_create_sandbox(user_id)
         sh(sb, "mkdir -p /data/uploads && [ -f /data/uploads/notice.txt ] || "
                "echo 'FIVE DAY NOTICE - rent past due' > /data/uploads/notice.txt")
-        reg = build_debug_registry()
+        reg = build_debug_registry(include_test_tools=True)
         ctx = {"sandbox": sb, "user_id": user_id}
 
         cases = []
@@ -999,7 +1073,16 @@ def fastapi_app():
     # Targets from the plan. Every token here is re-sent on EVERY iteration,
     # so a 200-token overrun costs 1,600 tokens on an 8-iteration turn.
     SYSTEM_PROMPT_BUDGET = 1500
-    TOOL_DEFS_BUDGET = 1200
+    # Raised from an initial guess of 1200 after measuring. ~354 tokens of
+    # this is fixed API scaffolding that appears the moment `tools` is
+    # non-empty; the rest is 7 tool definitions.
+    #
+    # Deliberately NOT trimmed further: a single wrong tool call costs a
+    # whole extra iteration. Measured example — an ambiguous filename
+    # convention cost one turn 34,000 extra input tokens, which is 20x the
+    # entire tool-definition block. Descriptions that prevent wrong calls
+    # pay for themselves many times over.
+    TOOL_DEFS_BUDGET = 1800
 
     @web_app.post("/api/debug/budget")
     async def budget_report(system: str = "", model: str = "claude-sonnet-5"):
@@ -1013,7 +1096,7 @@ def fastapi_app():
         from harness.adapters.anthropic_adapter import AnthropicAdapter
 
         adapter = AnthropicAdapter()
-        reg = build_debug_registry()
+        reg = build_debug_registry(include_test_tools=True)
         defs = reg.definitions()
         probe = [{"role": "user", "content": "x"}]
 
@@ -1511,6 +1594,36 @@ def fastapi_app():
         res["download_url"] = (f"/api/files/outputs/{res['filename']}"
                                f"?user_id={req.user_id}")
         return res
+
+    # ── T4.5 — document editing ───────────────────────────────────────────
+    class EditRequest(BaseModel):
+        source: str
+        output: str = ""
+        title: str = ""
+        edits: list[dict] = []
+        user_id: str = "kartik"
+
+    @web_app.post("/api/debug/edit")
+    def debug_edit(req: EditRequest):
+        c = worker_client(req.user_id)
+        r = c.call("edit_docx", {
+            "source": req.source, "output": req.output,
+            "title": req.title, "edits": req.edits,
+        }, timeout=150)
+        if not r.get("ok"):
+            raise HTTPException(500, r.get("error", "edit failed"))
+        res = r["result"]
+        if res.get("filename"):
+            res["download_url"] = (f"/api/files/outputs/{res['filename']}"
+                                   f"?user_id={req.user_id}")
+        return res
+
+    @web_app.get("/api/debug/sections")
+    def debug_sections(source: str, user_id: str = "kartik"):
+        r = worker_client(user_id).call("list_sections", {"source": source})
+        if not r.get("ok"):
+            raise HTTPException(404, r.get("error", "not found"))
+        return r["result"]
 
     # ── T4.2 — fetch with extract-then-discard ────────────────────────────
     @web_app.post("/api/debug/fetch")

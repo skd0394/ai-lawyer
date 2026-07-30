@@ -87,3 +87,7 @@ If an evaluator pushes on it, the honest follow-up is: if a future tool genuinel
   7332ch | naive   2337 | ours   740 |   3.2x | extracted
  37173ch | naive  14045 | ours   883 |  15.9x | extracted
  42341ch | naive  15719 | ours  1159 |  13.6x | extracted
+
+
+
+ I set an initial tool-definition budget of 1,200 tokens. Measured, seven tools plus the API's fixed scaffolding come to roughly 1,750. I raised the budget rather than cutting further, because I have a measured example of the tradeoff: an ambiguous filename convention caused one turn to burn 34,000 extra input tokens retrying — twenty times the cost of the entire tool-definition block. Descriptions that prevent a wrong tool call pay for themselves many times over. What I did cut was genuine waste: a redundant tool that duplicated an existing mode, and four test-only tools that were being shipped to production turns."

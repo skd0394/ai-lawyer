@@ -164,9 +164,13 @@ class FileStore:
         """
         listing = self.list()
         lines = []
-        for area in ("uploads", "outputs"):
+        for area, label in (("uploads", "uploaded by user"),
+                            ("outputs", "generated")):
             for f in listing.get(area, []):
                 kb = f"{round((f['bytes'] or 0) / 1024)}KB" if f["bytes"] else "?"
-                lines.append(f"- {f['name']} ({f['ext'].lstrip('.') or 'file'}, "
-                             f"{kb}, {area})")
+                # Area-qualified name. A bare name reads as ambiguous and
+                # the agent guesses the wrong directory; this gives it an
+                # unambiguous handle it can pass straight back to a tool.
+                lines.append(f"- {area}/{f['name']} "
+                             f"({f['ext'].lstrip('.') or 'file'}, {kb}, {label})")
         return "\n".join(lines) if lines else "(no files uploaded yet)"

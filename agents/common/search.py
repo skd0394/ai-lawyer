@@ -20,7 +20,9 @@ import re
 from dataclasses import dataclass, asdict
 from typing import Any
 
-SNIPPET_CHARS = 240          # ~60 tokens each; 5 results ~= 400 tokens
+SNIPPET_CHARS = 140          # measured: 240 chars gave ~824 tokens per
+                             # search, re-sent every iteration. 140 keeps
+                             # enough to choose a URL from.
 
 # Source quality tiers. A general search for "illinois eviction notice"
 # ranks law-firm marketing above the statute; legal answers must not cite

@@ -22,6 +22,20 @@ def _ms(t0: float) -> int:
     return int((time.perf_counter() - t0) * 1000)
 
 
+def _resolve(registry):
+    """`registry` may be a ToolRegistry or a CALLABLE returning one.
+
+    The callable form exists because a tool can change what tools should
+    exist — Agent B's advance_phase does exactly that. Resolving once per
+    turn meant the model was told it had new tools while the loop still
+    held the old set, and every call failed with "unknown tool".
+
+    Note this can invalidate the tool cache breakpoint when the set
+    changes. That is correct: different tools are a different prefix.
+    """
+    return registry() if callable(registry) else registry
+
+
 async def run_turn(
     *,
     adapter: ModelAdapter,
@@ -59,7 +73,6 @@ async def run_turn(
     billed_in = billed_out = 0
     stop_reason = "max_iterations"
 
-    tool_defs = adapter.format_tools(registry.definitions(), cache_last=cache)
     # Both breakpoints sit on content that is byte-identical for the whole
     # session, so iterations 2..N read them from cache instead of paying
     # full price to reprocess the same bytes every time.
@@ -73,6 +86,12 @@ async def run_turn(
         if cancel_check and cancel_check():
             stop_reason = "cancelled"
             break
+
+        # Re-resolved every iteration: a tool may have changed which tools
+        # should exist.
+        current = _resolve(registry)
+        tool_defs = adapter.format_tools(current.definitions(),
+                                         cache_last=cache)
 
         text_parts: list[str] = []
         tool_calls: list[ToolUseEnd] = []
@@ -148,7 +167,7 @@ async def run_turn(
             yield ToolStart(tool_call_id=call.id, name=call.name,
                             args_preview=args_preview(call.args))
             t0 = time.perf_counter()
-            out = await registry.dispatch(call.name, call.args, ctx)
+            out = await current.dispatch(call.name, call.args, ctx)
             elapsed = _ms(t0)
             yield ToolEnd(tool_call_id=call.id, name=call.name, ok=out.ok,
                           summary=out.summary, ms=elapsed)
@@ -166,7 +185,7 @@ async def run_turn(
             results.append(ToolResult(call_id=call.id, name=call.name,
                                       content=out.content, ok=out.ok))
 
-            if registry.is_halting(call.name):
+            if current.is_halting(call.name):
                 halted = True
 
         messages.append(adapter.tool_result_message(results))

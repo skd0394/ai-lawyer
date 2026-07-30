@@ -234,9 +234,17 @@ def fastapi_app():
     @web_app.get("/api/health")
     def health():
         key = os.environ.get("ANTHROPIC_API_KEY")
+        versions = {}
+        for mod in ("pydantic", "fastapi", "anthropic"):
+            try:
+                versions[mod] = __import__(mod).VERSION if mod == "pydantic" \
+                    else __import__(mod).__version__
+            except Exception as e:
+                versions[mod] = f"?: {e}"
         return {
             "ok": True,
             "service": "ailaw-kartik",
+            "versions": versions,
             "llm_key_present": bool(key),
             "llm_key_fingerprint": (key[:7] + "..." + key[-4:]) if key else None,
         }
@@ -661,6 +669,34 @@ def fastapi_app():
                            summary=f"read {name}{tag} ({len(body)} chars)")
 
 
+        # Research is unbounded by default and that is expensive: one
+        # observed turn hit 182k input tokens re-fetching the same page four
+        # times and guessing at section names. These caps live in ctx so
+        # both agents get them without coupling to Agent B's state.
+        RESEARCH_MAX_SEARCHES = 6
+        RESEARCH_MAX_FETCHES = 6
+
+        def _budget(ctx, key):
+            b = ctx.setdefault("research_budget",
+                               {"searches": 0, "fetches": 0, "urls": {}})
+            return b
+
+        def _force_synthesize(ctx):
+            """Exhausting the research budget ADVANCES the phase.
+
+            Telling the model "stop searching" is a suggestion it can
+            ignore, and it did — turns kept hitting max_iterations without
+            concluding. Removing the research tools makes stopping the only
+            option, and the loop re-resolves the registry each iteration so
+            it takes effect immediately.
+            """
+            st = ctx.get("state")
+            if st is None:
+                return
+            from agents.agent_b.state import Phase
+            if st.phase == Phase.RESEARCH:
+                st.advance(Phase.SYNTHESIZE)
+
         @reg.tool(
             name="web_search",
             description=(
@@ -680,6 +716,17 @@ def fastapi_app():
         )
         async def _search(args, ctx):
             from agents.common.search import web_search, format_for_model
+            b = _budget(ctx, "searches")
+            if b["searches"] >= RESEARCH_MAX_SEARCHES:
+                _force_synthesize(ctx)
+                return ToolOut(
+                    ok=False, summary="search budget exhausted",
+                    content=f"ERROR: {RESEARCH_MAX_SEARCHES} searches have "
+                            f"already been run this turn. Research is "
+                            f"complete. Present your findings and conclude "
+                            f"— note anything unresolved rather than "
+                            f"searching again.")
+            b["searches"] += 1
             payload = await web_search(
                 args.get("query", ""),
                 max_results=min(int(args.get("max_results", 5)), 8))
@@ -720,6 +767,29 @@ def fastapi_app():
             from anthropic import AsyncAnthropic
 
             url = args.get("url", "")
+            b = _budget(ctx, "fetches")
+
+            # Re-fetching a URL costs a round trip AND a fresh extraction
+            # call for content we already have. Observed four times on one
+            # page in a single turn.
+            if url in b["urls"]:
+                return ToolOut(
+                    ok=True, summary=f"already fetched {url[:50]}",
+                    content=b["urls"][url] +
+                            "\n\n[This page was already fetched this turn; "
+                            "the cached extract is shown. Use "
+                            "read_cached_page for more of it, or move on.]")
+
+            if b["fetches"] >= RESEARCH_MAX_FETCHES:
+                _force_synthesize(ctx)
+                return ToolOut(
+                    ok=False, summary="fetch budget exhausted",
+                    content=f"ERROR: {RESEARCH_MAX_FETCHES} pages have "
+                            f"already been fetched this turn. Research is "
+                            f"complete. Present your findings and conclude, "
+                            f"noting anything you could not verify.")
+            b["fetches"] += 1
+
             r = await fetch_and_extract(
                 worker=ctx["worker"], url=url,
                 purpose=args.get("purpose", "legal research"),
@@ -740,6 +810,7 @@ def fastapi_app():
 
             rec = reg.from_fetch(r) if reg else None
             quote = (r.get("verified_quotes") or [""])[0][:200]
+            b["urls"][url] = body          # serve repeats from here
             return ToolOut(
                 content=body,
                 summary=f"{r['confidence']}: {r.get('title', '')[:60]}",
@@ -936,9 +1007,22 @@ def fastapi_app():
                 return ToolOut(ok=False, summary="not cached",
                                content=f"ERROR: {res.get('error')}")
             if res.get("error"):
-                return ToolOut(ok=False, summary="no such section",
-                               content=f"ERROR: {res['error']} "
-                                       f"Available: {res.get('available')}")
+                # Fall back to the top of the page rather than erroring.
+                # The model cannot guess heading names reliably, and each
+                # failed guess costs a whole iteration.
+                fallback = ctx["worker"].call("read_cached", {
+                    "handle": args.get("handle", ""), "max_chars": 6000})
+                body = ((fallback.get("result") or {}).get("text") or "")
+                if not body:
+                    return ToolOut(ok=False, summary="no such section",
+                                   content=f"ERROR: {res['error']}")
+                return ToolOut(
+                    ok=True, summary="section not found, showing page start",
+                    content=f"[No section matching "
+                            f"'{args.get('section')}'. Showing the start of "
+                            f"the page instead. Headings present: "
+                            f"{', '.join(res.get('available', [])[:12])}]\n\n"
+                            + body)
             return ToolOut(content=res["text"],
                            summary=f"cached page ({len(res['text'])} chars)")
 
@@ -1068,6 +1152,676 @@ def fastapi_app():
             "tools": reg.names(),
             "cases": all_cases,
         }
+
+    # ── T5.3 — Agent B: registry, turn path, question forms ───────────────
+    def build_agent_b_registry(state, base_reg):
+        """Agent A's tools PLUS the structured ones, then filtered by phase.
+
+        registry.subset() IS the state machine. In TERMINAL the subset is
+        empty, so the consultation is over as a matter of what exists —
+        not as a matter of what the model was told.
+        """
+        from harness.tools import ToolRegistry, ToolOut
+        from agents.agent_b.tools import (ASK_QUESTIONS_SCHEMA,
+                                          validate_questions,
+                                          already_answered)
+        from agents.agent_b.state import Phase
+
+        reg = ToolRegistry(
+            [base_reg._specs[n] for n in base_reg.names()])
+
+        @reg.tool(
+            name="ask_questions",
+            description=(
+                "Ask the user 2-4 questions as a form, then STOP. This is "
+                "the only way to ask the user anything. Every question needs "
+                "help_text explaining why you are asking."),
+            schema=ASK_QUESTIONS_SCHEMA,
+            halting=True,
+            max_result_chars=2000,
+        )
+        def _ask(args, ctx):
+            st = ctx["state"]
+            clean, errors = validate_questions(args)
+
+            dupes = already_answered(clean, st.collected)
+            if dupes:
+                errors.append(
+                    f"already answered, do not re-ask: {', '.join(dupes)}")
+
+            if errors or not clean:
+                # Rejected back to the model as a tool error. Because this
+                # returns ok=False the loop still halts, but the UI gets no
+                # form — the model corrects and asks again next turn.
+                return ToolOut(
+                    ok=False, summary="invalid question batch",
+                    content="ERROR: the question batch was rejected.\n"
+                            + "\n".join(f"  - {e}" for e in errors)
+                            + "\nFix these and call ask_questions again.")
+
+            st.pending_questions = clean
+            st.questions_asked_count += len(clean)
+
+            return ToolOut(
+                content=f"Asked {len(clean)} question(s). The turn ends here; "
+                        f"the answers arrive as the next user message.",
+                summary=f"asked {len(clean)} question(s)",
+                payload={"kind": "question_form",
+                         "context": (args.get("context") or "").strip(),
+                         "questions": clean},
+            )
+
+        @reg.tool(
+            name="advance_phase",
+            description=(
+                "Move the consultation to the next phase once you have what "
+                "you need. Phases run INTAKE -> CLARIFY -> RESEARCH -> "
+                "SYNTHESIZE. Forward only."),
+            schema={
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string",
+                           "enum": ["CLARIFY", "RESEARCH", "SYNTHESIZE"]},
+                    "jurisdiction": {"type": "string",
+                                     "description": "governing jurisdiction, "
+                                                    "once established"},
+                    "matter_type": {"type": "string",
+                                    "description": "short label, e.g. "
+                                                   "'LLC member withdrawal'"},
+                },
+                "required": ["to"],
+            },
+            max_result_chars=600,
+        )
+        def _advance(args, ctx):
+            st = ctx["state"]
+            # These fields have no other writer, and RESEARCH without a
+            # jurisdiction is useless.
+            st.record_facts(args.get("jurisdiction", ""),
+                            args.get("matter_type", ""))
+            try:
+                target = Phase(args.get("to", ""))
+            except ValueError:
+                return ToolOut(ok=False, summary="bad phase",
+                               content="ERROR: unknown phase.")
+            before = st.phase.value
+            if not st.advance(target):
+                return ToolOut(
+                    ok=False, summary="cannot advance",
+                    content=f"ERROR: cannot move from {before} to "
+                            f"{target.value}. Phases only move forward.")
+            bits = [f"Phase: {before} -> {st.phase.value}."]
+            if st.jurisdiction:
+                bits.append(f"Jurisdiction: {st.jurisdiction}.")
+            bits.append(f"Tools now available: "
+                        f"{', '.join(st.allowed_tools())}")
+            return ToolOut(content=" ".join(bits),
+                           summary=f"{before} -> {st.phase.value}")
+
+        @reg.tool(
+            name="request_file",
+            description=(
+                "Ask the user for a specific document, then STOP. Explain "
+                "why it matters. If they skip it you must recover by asking "
+                "questions instead — never request the same document twice."),
+            schema={
+                "type": "object",
+                "properties": {
+                    "document_name": {"type": "string",
+                                      "description": "a SHORT name, under 60 "
+                                                     "characters, e.g. 'the "
+                                                     "operating agreement' or "
+                                                     "'the equipment lease'"},
+                    "reason": {"type": "string",
+                               "description": "what it would tell you and "
+                                              "why that matters here"},
+                    "alternative_if_unavailable": {
+                        "type": "string",
+                        "description": "what you will ask instead if they "
+                                       "do not have it"},
+                },
+                "required": ["document_name", "reason"],
+            },
+            halting=True,
+            max_result_chars=1200,
+        )
+        def _request_file(args, ctx):
+            st = ctx["state"]
+            name = (args.get("document_name") or "").strip()
+            if not name:
+                return ToolOut(ok=False, summary="no document named",
+                               content="ERROR: name the document you want.")
+            if len(name) > 60:
+                # The name is an identifier the user and the UI refer back
+                # to. A sentence-long "name" is unusable as a handle.
+                return ToolOut(
+                    ok=False, summary="name too long",
+                    content=f"ERROR: document_name is {len(name)} characters. "
+                            f"Give a short name (under 60) such as 'the "
+                            f"operating agreement'. Put the explanation in "
+                            f"`reason`.")
+
+            # The spec is explicit that a skipped document must not be
+            # re-requested. Enforced here, not left to the prompt.
+            for r in st.requested_files:
+                if r.document_name.lower() == name.lower():
+                    if r.status == "skipped":
+                        return ToolOut(
+                            ok=False, summary="already declined",
+                            content=f"ERROR: the user already declined to "
+                                    f"provide '{name}'. Do not ask again. "
+                                    f"Collect the same information through "
+                                    f"ask_questions instead.")
+                    if r.status == "provided":
+                        return ToolOut(
+                            ok=False, summary="already provided",
+                            content=f"ERROR: '{name}' has already been "
+                                    f"provided. Read it with read_document.")
+
+            reason = (args.get("reason") or "").strip()
+            if len(reason) < 30:
+                return ToolOut(ok=False, summary="reason too thin",
+                               content="ERROR: explain what the document "
+                                       "would tell you and why it matters.")
+
+            st.mark_file(name, "pending")
+            return ToolOut(
+                content=f"Requested '{name}'. The turn ends here. The user "
+                        f"will either upload it or decline.",
+                summary=f"requested {name}",
+                payload={"kind": "file_request",
+                         "document_name": name,
+                         "reason": reason,
+                         "alternative_if_unavailable":
+                             (args.get("alternative_if_unavailable") or
+                              "").strip()},
+            )
+
+        @reg.tool(
+            name="present_findings",
+            description=(
+                "Present analysis as structured findings rather than a wall "
+                "of prose. Does NOT end the turn — continue afterwards. Cite "
+                "only sources you actually fetched."),
+            schema={
+                "type": "object",
+                "properties": {
+                    "findings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "summary": {"type": "string",
+                                            "description": "one or two "
+                                                           "plain sentences"},
+                                "detail": {"type": "string"},
+                                "severity": {"type": "string",
+                                             "enum": ["info", "notable",
+                                                      "important", "urgent"]},
+                                "sources": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "url": {"type": "string"},
+                                            "title": {"type": "string"},
+                                        },
+                                    },
+                                },
+                            },
+                            "required": ["title", "summary"],
+                        },
+                    },
+                },
+                "required": ["findings"],
+            },
+            max_result_chars=1500,
+        )
+        def _findings(args, ctx):
+            from agents.agent_b.state import FindingRecord
+            st = ctx["state"]
+            raw = args.get("findings") or []
+            if not raw:
+                return ToolOut(ok=False, summary="no findings",
+                               content="ERROR: supply at least one finding.")
+
+            reg_cites = ctx.get("citations")
+            clean, ghosts = [], []
+            for f in raw[:8]:
+                srcs = []
+                for src in (f.get("sources") or [])[:4]:
+                    url = (src.get("url") or "").strip()
+                    if not url:
+                        continue
+                    rec = reg_cites.get(url) if reg_cites else None
+                    if rec is None:
+                        # Same rule as Agent A: a URL that was never
+                        # fetched is not a citation.
+                        ghosts.append(url)
+                        continue
+                    srcs.append({"url": url, "title": rec.title,
+                                 "confidence": rec.confidence})
+                clean.append(FindingRecord(
+                    title=(f.get("title") or "").strip(),
+                    summary=(f.get("summary") or "").strip(),
+                    detail=(f.get("detail") or "").strip(),
+                    severity=f.get("severity", "info"),
+                    sources=srcs))
+
+            titles = {f.title for f in clean}
+            existing = {f.title for f in st.findings}
+            if titles and titles.issubset(existing):
+                return ToolOut(
+                    ok=False, summary="duplicate findings",
+                    content="ERROR: these findings were already presented. "
+                            "Move on — advance the phase and conclude.")
+
+            st.findings.extend(clean)
+            note = ""
+            if ghosts:
+                note = (f" WARNING: {len(ghosts)} source URL(s) were never "
+                        f"fetched and were dropped: {', '.join(ghosts[:3])}. "
+                        f"Fetch a source before citing it.")
+            return ToolOut(
+                content=f"Presented {len(clean)} finding(s).{note}",
+                summary=f"{len(clean)} finding(s)",
+                payload={"kind": "findings",
+                         "findings": [
+                             {"title": f.title, "summary": f.summary,
+                              "detail": f.detail, "severity": f.severity,
+                              "sources": f.sources} for f in clean]},
+            )
+
+        @reg.tool(
+            name="emit_drafting_handoff",
+            description=(
+                "END the consultation with a machine-readable package for a "
+                "downstream drafting pipeline. Use when a document can "
+                "address the situation. drafting_instructions must be "
+                "thorough — several paragraphs, enough for a drafter who "
+                "never saw this conversation."),
+            schema={
+                "type": "object",
+                "properties": {
+                    "document_type": {"type": "string"},
+                    "jurisdiction": {"type": "string"},
+                    "drafting_instructions": {
+                        "type": "string",
+                        "description": "several paragraphs: structure, key "
+                                       "terms, what each clause must do"},
+                    "collected_information": {
+                        "type": "object",
+                        "description": "every fact gathered, keyed"},
+                    "noted_gaps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "field": {"type": "string"},
+                                "why_it_matters": {"type": "string"},
+                                "suggested_placeholder": {"type": "string"},
+                            },
+                        },
+                    },
+                    "recommended_clauses": {"type": "array",
+                                            "items": {"type": "string"}},
+                },
+                "required": ["document_type", "jurisdiction",
+                             "drafting_instructions"],
+            },
+            halting=True,
+            max_result_chars=1200,
+        )
+        def _handoff(args, ctx):
+            from agents.agent_b.state import Phase
+            st = ctx["state"]
+
+            instr = (args.get("drafting_instructions") or "").strip()
+            # "Thorough drafting instructions" is a spec requirement. A
+            # one-liner is useless to a pipeline that never saw this
+            # conversation, so it is rejected rather than accepted.
+            if len(instr) < 400:
+                return ToolOut(
+                    ok=False, summary="instructions too thin",
+                    content=f"ERROR: drafting_instructions is only "
+                            f"{len(instr)} characters. A downstream drafter "
+                            f"has no other context. Describe the document's "
+                            f"structure, the key terms, and what each clause "
+                            f"must accomplish.")
+            if not (args.get("jurisdiction") or st.jurisdiction):
+                return ToolOut(ok=False, summary="no jurisdiction",
+                               content="ERROR: jurisdiction is required.")
+
+            payload = {
+                "kind": "drafting_handoff",
+                "document_type": args.get("document_type", ""),
+                "jurisdiction": args.get("jurisdiction") or st.jurisdiction,
+                "drafting_instructions": instr,
+                "collected_information": (args.get("collected_information")
+                                          or st.collected),
+                "noted_gaps": args.get("noted_gaps") or [],
+                "recommended_clauses": args.get("recommended_clauses") or [],
+                "skipped_documents": st.skipped_files(),
+            }
+            st.terminal_kind = "drafting_handoff"
+            st.terminal_payload = payload
+            st.phase = Phase.TERMINAL      # freeze: no tools remain
+
+            return ToolOut(
+                content="Consultation concluded with a drafting handoff.",
+                summary=f"handoff: {payload['document_type']}",
+                payload=payload)
+
+        @reg.tool(
+            name="emit_attorney_conclusion",
+            description=(
+                "END the consultation by concluding the user needs a "
+                "lawyer. Use when no document can resolve the situation, or "
+                "the matter is contested, time-critical, or beyond what "
+                "legal information can address."),
+            schema={
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string"},
+                    "why_attorney_needed": {"type": "string"},
+                    "recommended_next_steps": {"type": "array",
+                                               "items": {"type": "string"}},
+                    "urgency": {"type": "string",
+                                "enum": ["low", "medium", "high"]},
+                    "practice_area": {"type": "string"},
+                },
+                "required": ["summary", "why_attorney_needed", "urgency",
+                             "practice_area"],
+            },
+            halting=True,
+            max_result_chars=1200,
+        )
+        def _conclude(args, ctx):
+            from agents.agent_b.state import Phase
+            st = ctx["state"]
+            summary = (args.get("summary") or "").strip()
+            if len(summary) < 120:
+                return ToolOut(ok=False, summary="summary too thin",
+                               content="ERROR: the summary must actually "
+                                       "describe the situation and what was "
+                                       "established.")
+
+            payload = {
+                "kind": "attorney_conclusion",
+                "summary": summary,
+                "why_attorney_needed": args.get("why_attorney_needed", ""),
+                "recommended_next_steps":
+                    args.get("recommended_next_steps") or [],
+                "urgency": args.get("urgency", "medium"),
+                "practice_area": args.get("practice_area", ""),
+                "jurisdiction": st.jurisdiction,
+                "collected_information": st.collected,
+            }
+            st.terminal_kind = "attorney_conclusion"
+            st.terminal_payload = payload
+            st.phase = Phase.TERMINAL
+
+            return ToolOut(
+                content="Consultation concluded with an attorney referral.",
+                summary=f"attorney referral ({payload['urgency']})",
+                payload=payload)
+
+        return reg.subset(state.allowed_tools())
+
+
+    class ConsultRequest(BaseModel):
+        prompt: str = ""
+        # Structured answers keyed by question id. The spec: "the answers
+        # come back as the next message." They are merged into state BEFORE
+        # the turn runs, so the agent sees them as established fact rather
+        # than as something to parse out of prose.
+        answers: dict = {}
+        # Set when the user declines a requested document.
+        skip_file: str = ""
+        user_id: str = "kartik"
+        session_id: str = "consult-1"
+        model: str = "claude-sonnet-5"
+        max_iterations: int = 8
+        max_tokens: int = 8000
+
+    @web_app.post("/api/consult")
+    async def consult(req: ConsultRequest):
+        """Agent B turn. Same loop, same adapter, same session layer as
+        /api/chat — different prompt, tools, and state."""
+        import asyncio as _a
+        import uuid as _uuid
+        from fastapi.responses import StreamingResponse
+        from harness.adapters.anthropic_adapter import AnthropicAdapter
+        from harness.loop import run_turn
+        from harness.events import ErrorEvent, StructuredBlock
+        from harness.session import rebuild_messages
+        from infra.session_store import SessionStore, make_turn_record
+        from infra.files import FileStore
+        from obs.tracer import Tracer
+        from agents.agent_b.prompt import SYSTEM_PROMPT, build_user_message
+        from agents.common.citations import CitationRegistry
+
+        turn_id = _uuid.uuid4().hex[:12]
+        if not locks.acquire(req.user_id, turn_id, req.session_id):
+            raise HTTPException(409, "a turn is already running for this user")
+
+        from agents.agent_b.tools import compact_question_history
+
+        st = load_consult_state(req.user_id, req.session_id)
+        if st.phase.value == "TERMINAL":
+            locks.release(req.user_id)
+            raise HTTPException(
+                409, "this consultation has concluded and cannot continue")
+
+        sb, _ = get_or_create_sandbox(req.user_id)
+        store = SessionStore(req.user_id, req.session_id)
+        history = rebuild_messages(store.read_turns())
+        # Strip the text of question batches already answered — ~900 tokens
+        # each, otherwise re-sent as input on every remaining turn.
+        history, chars_saved = compact_question_history(history, st.collected)
+
+        try:
+            manifest = FileStore(req.user_id).manifest()
+        except Exception:
+            manifest = ""
+
+        st.turn_count += 1
+
+        # ── T5.4: ingest answers before the turn ──────────────────────────
+        note_parts = []
+        if req.answers:
+            unknown = [k for k in req.answers
+                       if k not in {q.get("id")
+                                    for q in st.pending_questions}]
+            n = st.record_answers(req.answers)
+            note_parts.append(
+                f"The user answered {n} question(s): "
+                + ", ".join(sorted(req.answers)))
+            if unknown:
+                note_parts.append(
+                    f"(these were not in the last batch: {', '.join(unknown)})")
+
+        if req.skip_file:
+            # Spec: "If the user skips the upload, the agent recovers
+            # gracefully and collects the details through questions instead."
+            st.mark_file(req.skip_file, "skipped")
+            note_parts.append(
+                f"The user declined to provide '{req.skip_file}'. Do not ask "
+                f"for it again — collect the same information through "
+                f"questions instead.")
+
+        user_text = req.prompt or " ".join(note_parts) or "Continue."
+        if note_parts and req.prompt:
+            user_text = " ".join(note_parts) + "\n\n" + req.prompt
+
+        # NOTE: the answer VALUES are not repeated here. They are already in
+        # COLLECTED SO FAR inside the state block, so echoing them would be
+        # paying twice for the same tokens on every turn.
+        messages = history + [{
+            "role": "user",
+            "content": build_user_message(user_text, st.to_context_block(),
+                                          manifest)}]
+        turn_start_index = len(history)
+
+        tracer = Tracer(turn_id=turn_id, session_id=req.session_id,
+                        user_id=req.user_id, agent="B")
+        citations = CitationRegistry()
+        # A callable, not a fixed registry: advance_phase changes which
+        # tools should exist, and the loop re-resolves each iteration.
+        base_registry = build_debug_registry()
+
+        def registry():
+            return build_agent_b_registry(st, base_registry)
+
+        async def event_stream():
+            queue: _a.Queue = _a.Queue()
+
+            async def produce():
+                try:
+                    async for ev in run_turn(
+                        adapter=AnthropicAdapter(), model=req.model,
+                        messages=messages, registry=registry,
+                        system=SYSTEM_PROMPT,
+                        ctx={"sandbox": sb, "user_id": req.user_id,
+                             "worker": worker_client(req.user_id),
+                             "citations": citations, "state": st},
+                        max_iterations=req.max_iterations,
+                        max_tokens=req.max_tokens, cache=True,
+                        turn_id=turn_id, session_id=req.session_id, agent="B",
+                        cancel_check=lambda: locks.is_cancelled(
+                            req.user_id, turn_id),
+                    ):
+                        await queue.put(ev)
+                except Exception as e:
+                    await queue.put(ErrorEvent(
+                        code="internal", message=f"{type(e).__name__}: {e}"))
+                finally:
+                    await queue.put(None)
+
+            task = _a.create_task(produce())
+            try:
+                while True:
+                    try:
+                        ev = await _a.wait_for(queue.get(), timeout=HEARTBEAT_S)
+                    except _a.TimeoutError:
+                        yield ": heartbeat\n\n"
+                        continue
+                    if ev is None:
+                        break
+                    tracer.observe(ev)
+                    yield ev.to_sse()
+
+                yield StructuredBlock(
+                    kind="consultation_state",
+                    payload={"compaction_chars_saved": chars_saved,
+                             "phase": st.phase.value,
+                             "allowed_tools": st.allowed_tools(),
+                             "pending_questions": st.pending_questions,
+                             "collected_count": len(st.collected),
+                             "is_terminal": st.phase.value == "TERMINAL"},
+                ).to_sse()
+            finally:
+                task.cancel()
+                try:
+                    new_messages = messages[turn_start_index:]
+                    if len(new_messages) > 1:
+                        store.append_turn(make_turn_record(
+                            turn_id=turn_id, prompt=user_text,
+                            messages=new_messages,
+                            stop_reason=tracer.stop_reason,
+                            usage=tracer.totals, agent="B"))
+                    save_consult_state(req.user_id, req.session_id, st)
+                except Exception as e:
+                    print(f"consult persist failed: {e}")
+                locks.release(req.user_id)
+                try:
+                    tracer.finish()
+                    traces_volume.commit()
+                except Exception:
+                    pass
+
+        return StreamingResponse(
+            event_stream(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
+                     "X-Accel-Buffering": "no", "X-Turn-Id": turn_id})
+
+    # ── T5.1 — consultation state ─────────────────────────────────────────
+    def load_consult_state(user_id: str, session_id: str):
+        """State lives beside the turn log on the user's volume, so a
+        consultation survives sandbox recycling exactly like a chat does."""
+        from infra.session_store import SessionStore
+        from agents.agent_b.state import load_state
+        return load_state(SessionStore(user_id, session_id).get_state())
+
+    def save_consult_state(user_id: str, session_id: str, st) -> None:
+        from infra.session_store import SessionStore
+        from agents.agent_b.state import dump_state
+        SessionStore(user_id, session_id).set_state(dump_state(st))
+
+    @web_app.get("/api/consult/{session_id}/state")
+    def get_consult_state(session_id: str, user_id: str = "kartik"):
+        from agents.agent_b.state import dump_state
+        st = load_consult_state(user_id, session_id)
+        return {
+            "session_id": session_id,
+            "state": dump_state(st),
+            "allowed_tools": st.allowed_tools(),
+            "context_block": st.to_context_block(),
+            "is_terminal": st.phase.value == "TERMINAL",
+            "terminal_kind": st.terminal_kind,
+            "terminal_payload": st.terminal_payload,
+        }
+
+    @web_app.post("/api/consult/{session_id}/reset")
+    def reset_consult_state(session_id: str, user_id: str = "kartik"):
+        from agents.agent_b.state import ConsultationState
+        st = ConsultationState()
+        save_consult_state(user_id, session_id, st)
+        return {"reset": True, "phase": st.phase.value}
+
+    @web_app.post("/api/debug/consult/state-test")
+    def consult_state_test(user_id: str = "kartik",
+                           session_id: str = "state-test"):
+        """Round-trip the state through the volume and confirm the machine's
+        invariants survive persistence."""
+        from agents.agent_b.state import (ConsultationState, Phase,
+                                          copy_state)
+        import pydantic
+
+        st = ConsultationState()
+        st.matter_type = "partnership exit"
+        st.jurisdiction = "Illinois"
+        st.pending_questions = [{"id": "q_split",
+                                 "prompt": "What is the ownership split?"}]
+        st.record_answers({"q_split": "60/40"})
+        st.mark_file("operating agreement", "skipped", ["q_split"])
+        st.gaps = ["buyout valuation method"]
+        st.advance(Phase.CLARIFY)
+        save_consult_state(user_id, session_id, st)
+
+        back = load_consult_state(user_id, session_id)
+        cases = [
+            {"case": "phase survives", "pass": back.phase == Phase.CLARIFY},
+            {"case": "answers survive",
+             "pass": back.collected.get("q_split") == "60/40"},
+            {"case": "skip recorded",
+             "pass": back.skipped_files() == ["operating agreement"]},
+            {"case": "pending cleared after answers",
+             "pass": back.pending_questions == []},
+            {"case": "no backward transition",
+             "pass": back.advance(Phase.INTAKE) is False},
+            {"case": "terminal has no tools",
+             "pass": (lambda s: (s.advance(Phase.TERMINAL),
+                                 s.allowed_tools() == [])[1])(
+                 copy_state(back))},
+        ]
+        return {"passed": sum(1 for c in cases if c["pass"]),
+                "total": len(cases),
+                "all_passed": all(c["pass"] for c in cases),
+                "pydantic_version": pydantic.VERSION,
+                "cases": cases,
+                "context_block": back.to_context_block()}
 
     # ── T4.7 — adversarial suite ──────────────────────────────────────────
     # Each case is a prompt plus MECHANICAL checks. A prompt rule you cannot

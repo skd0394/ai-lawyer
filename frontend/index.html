@@ -1,0 +1,880 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Lawyer</title>
+<style>
+:root{
+  --bg:#0e1116; --panel:#161a21; --panel2:#1c212a; --line:#262d38;
+  --text:#e6e9ef; --dim:#8b93a1; --faint:#5b6472;
+  --accent:#6ea8fe; --ok:#5fbf8f; --warn:#d9a441; --bad:#e0736d; --purple:#b18ce0;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  height:100vh;display:flex;overflow:hidden}
+button{font:inherit;cursor:pointer;border:0;border-radius:6px}
+input,textarea,select{font:inherit;background:var(--panel2);color:var(--text);
+  border:1px solid var(--line);border-radius:6px;padding:8px 10px;width:100%}
+input:focus,textarea:focus,select:focus{outline:0;border-color:var(--accent)}
+
+/* ── sidebar ───────────────────────────────────────────────────────── */
+#side{width:210px;background:var(--panel);border-right:1px solid var(--line);
+  padding:16px 12px;display:flex;flex-direction:column;gap:6px;flex-shrink:0}
+#side h1{font-size:15px;margin:0 0 14px;padding:0 8px;letter-spacing:.3px}
+#side h1 span{color:var(--accent)}
+.nav{background:none;color:var(--dim);text-align:left;padding:9px 10px;
+  border-radius:6px;font-size:13px}
+.nav:hover{background:var(--panel2);color:var(--text)}
+.nav.on{background:var(--panel2);color:var(--text);box-shadow:inset 2px 0 0 var(--accent)}
+#hist{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);
+  flex:1;overflow-y:auto;min-height:0}
+#hist .hd{font-size:10.5px;text-transform:uppercase;letter-spacing:.7px;
+  color:var(--faint);padding:0 8px 7px}
+.sess{display:flex;align-items:center;gap:6px;padding:7px 8px;border-radius:6px;
+  cursor:pointer;font-size:12px;color:var(--dim);line-height:1.35}
+.sess:hover{background:var(--panel2);color:var(--text)}
+.sess.on{background:var(--panel2);color:var(--text)}
+.sess .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+.sess .ag{font-size:9px;padding:1px 4px;border-radius:3px;flex-shrink:0;
+  background:var(--line);color:var(--faint)}
+.sess .ag.B{background:#2c2440;color:var(--purple)}
+.sess .x{opacity:0;font-size:14px;color:var(--faint);padding:0 2px}
+.sess:hover .x{opacity:1}
+.replay{max-width:860px;margin:0 auto 14px;text-align:center;font-size:11.5px;
+  color:var(--faint);padding:7px;border-bottom:1px solid var(--line)}
+
+#meta{padding:10px 8px;font-size:11px;color:var(--faint);
+  border-top:1px solid var(--line);line-height:1.7}
+#meta b{color:var(--dim);font-weight:500}
+
+/* ── main ──────────────────────────────────────────────────────────── */
+#main{flex:1;display:flex;flex-direction:column;min-width:0}
+#head{padding:12px 20px;border-bottom:1px solid var(--line);
+  display:flex;align-items:center;gap:12px;flex-shrink:0}
+#head h2{font-size:14px;margin:0;font-weight:600}
+#head .sub{font-size:12px;color:var(--faint)}
+#scroll{flex:1;overflow-y:auto;padding:20px 24px}
+#composer{border-top:1px solid var(--line);padding:12px 20px;display:flex;
+  gap:8px;align-items:flex-end;flex-shrink:0}
+#composer textarea{resize:none;height:44px;max-height:150px}
+.btn{background:var(--accent);color:#0b0f14;padding:10px 18px;font-weight:600}
+.btn:disabled{opacity:.4;cursor:default}
+.btn.ghost{background:var(--panel2);color:var(--dim)}
+.btn.danger{background:var(--bad);color:#150b0b}
+.btn.sm{padding:6px 12px;font-size:12px}
+
+/* ── messages ──────────────────────────────────────────────────────── */
+.msg{max-width:860px;margin:0 auto 18px}
+.who{font-size:11px;color:var(--faint);text-transform:uppercase;
+  letter-spacing:.7px;margin-bottom:6px}
+.bubble{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:14px 16px;white-space:pre-wrap;word-wrap:break-word}
+.msg.user .bubble{background:var(--panel2);border-color:#2f3946}
+.msg.user .who{color:var(--accent)}
+
+.chip{display:inline-flex;align-items:center;gap:7px;background:var(--panel2);
+  border:1px solid var(--line);border-radius:20px;padding:5px 13px;font-size:12px;
+  color:var(--dim);margin:3px 5px 3px 0}
+.chip .dot{width:6px;height:6px;border-radius:50%;background:var(--warn);
+  animation:pulse 1.1s infinite}
+.chip.done .dot{background:var(--ok);animation:none}
+.chip.fail .dot{background:var(--bad);animation:none}
+.chip .ms{color:var(--faint);font-size:11px}
+@keyframes pulse{0%,100%{opacity:.35}50%{opacity:1}}
+
+.cite{display:block;background:var(--panel2);border-left:3px solid var(--line);
+  border-radius:0 6px 6px 0;padding:9px 13px;margin:7px 0;font-size:12.5px}
+.cite.verified{border-left-color:var(--ok)}
+.cite.partial{border-left-color:var(--warn)}
+.cite.unverified{border-left-color:var(--bad)}
+.cite a{color:var(--accent);text-decoration:none;word-break:break-all}
+.cite a:hover{text-decoration:underline}
+.cite .tag{font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;
+  color:var(--faint);display:block;margin-top:3px}
+
+.doc{display:flex;align-items:center;gap:12px;background:var(--panel2);
+  border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:9px 0}
+.doc .nm{font-weight:600;font-size:13px}
+.doc .sm{font-size:11.5px;color:var(--faint)}
+
+.status{display:flex;align-items:center;gap:11px;padding:11px 14px;margin:9px 0;
+  background:linear-gradient(90deg,var(--panel) 0%,var(--panel2) 50%,var(--panel) 100%);
+  background-size:200% 100%;animation:shimmer 2.2s ease-in-out infinite;
+  border:1px solid var(--line);border-radius:8px;font-size:13px;color:var(--dim)}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.status .spin{width:13px;height:13px;border:2px solid var(--line);
+  border-top-color:var(--accent);border-radius:50%;
+  animation:spin .8s linear infinite;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+.status .what{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+.status .el{color:var(--faint);font-size:11.5px;font-variant-numeric:tabular-nums}
+
+.foot{font-size:11px;color:var(--faint);margin-top:9px;display:flex;
+  gap:14px;flex-wrap:wrap}
+.foot b{color:var(--dim);font-weight:500}
+.err{background:#2a1a1a;border:1px solid #4a2626;color:#eaa9a4;
+  border-radius:8px;padding:11px 14px;margin:9px 0;font-size:13px}
+.warnbox{background:#2a2418;border:1px solid #4a3f26;color:#e5c98a}
+
+/* ── agent B blocks ────────────────────────────────────────────────── */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:16px 18px;margin:12px 0}
+.card > h3{margin:0 0 4px;font-size:13px;letter-spacing:.4px;
+  text-transform:uppercase;color:var(--accent)}
+.card .lead{color:var(--dim);font-size:13px;margin-bottom:14px}
+.q{margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid var(--line)}
+.q:last-of-type{border-bottom:0;padding-bottom:0;margin-bottom:10px}
+.q label{display:block;font-weight:600;margin-bottom:5px;font-size:13.5px}
+.q .why{font-size:12px;color:var(--faint);margin-bottom:9px;font-style:italic}
+.opt{display:flex;align-items:flex-start;gap:9px;padding:6px 0;cursor:pointer;
+  font-size:13px}
+.opt input{width:auto;margin-top:2px}
+.finding{border-left:3px solid var(--line);padding:2px 0 2px 13px;margin:12px 0}
+.finding.important{border-left-color:var(--warn)}
+.finding.urgent{border-left-color:var(--bad)}
+.finding.notable{border-left-color:var(--accent)}
+.finding .t{font-weight:600;font-size:13.5px}
+.finding .s{color:var(--dim);font-size:13px;margin-top:3px}
+.sev{font-size:10px;text-transform:uppercase;letter-spacing:.6px;
+  color:var(--faint);margin-left:8px}
+.phase{display:inline-block;background:var(--panel2);border:1px solid var(--line);
+  border-radius:4px;padding:2px 9px;font-size:11px;color:var(--dim);
+  letter-spacing:.5px}
+pre{background:#0b0e13;border:1px solid var(--line);border-radius:8px;
+  padding:14px;overflow-x:auto;font-size:11.5px;line-height:1.6;
+  font-family:ui-monospace,Menlo,monospace;max-height:420px}
+
+/* ── files & traces ────────────────────────────────────────────────── */
+.row{display:flex;align-items:center;gap:12px;background:var(--panel);
+  border:1px solid var(--line);border-radius:8px;padding:11px 14px;margin:7px 0}
+.row .grow{flex:1;min-width:0}
+.row .nm{font-weight:600;font-size:13px}
+.row .sm{font-size:11.5px;color:var(--faint)}
+.drop{border:2px dashed var(--line);border-radius:10px;padding:28px;
+  text-align:center;color:var(--faint);margin-bottom:18px;cursor:pointer}
+.drop.over{border-color:var(--accent);color:var(--accent)}
+.span{display:grid;grid-template-columns:110px 1fr 90px;gap:12px;
+  padding:7px 0;border-bottom:1px solid var(--line);font-size:12.5px}
+.span .k{color:var(--faint);font-size:11px;text-transform:uppercase;
+  letter-spacing:.5px}
+.empty{color:var(--faint);text-align:center;padding:50px 20px;font-size:13px}
+</style>
+</head>
+<body>
+
+<div id="side">
+  <h1>AI <span>Lawyer</span></h1>
+  <button class="nav on" data-view="chat">Chat</button>
+  <button class="nav" data-view="consult">Consultation</button>
+  <button class="nav" data-view="files">Files</button>
+  <button class="nav" data-view="traces">Traces</button>
+  <div id="hist"></div>
+  <div id="meta">
+    <b>user</b> <span id="mUser">kartik</span><br>
+    <b>session</b> <span id="mSess">—</span><br>
+    <b>turn cost</b> <span id="mCost">—</span><br>
+    <b>session total</b> <span id="mTotal">$0.0000</span>
+  </div>
+</div>
+
+<div id="main">
+  <div id="head">
+    <h2 id="hTitle">Freeform legal assistant</h2>
+    <span class="sub" id="hSub">Agent A · research, analysis, drafting</span>
+    <span style="flex:1"></span>
+    <span class="phase" id="hPhase" style="display:none"></span>
+    <button class="btn ghost sm" id="bNew">New session</button>
+    <button class="btn danger sm" id="bCancel" style="display:none">Cancel</button>
+  </div>
+  <div id="scroll"></div>
+  <div id="composer">
+    <textarea id="input" placeholder="Ask a legal question, or describe a document you need…"></textarea>
+    <button class="btn" id="bSend">Send</button>
+  </div>
+</div>
+
+<script>
+const API = "";
+const USER = new URLSearchParams(location.search).get("user") || "kartik";
+document.getElementById("mUser").textContent = USER;
+
+let view = "chat";
+let session = { chat: newId("s"), consult: newId("c") };
+let running = false, sessionCost = 0;
+
+function newId(p){ return p + "-" + Date.now().toString(36); }
+const $ = s => document.querySelector(s);
+const scroll = $("#scroll");
+const atBottom = () => scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 120;
+function toBottom(force){ if(force || atBottom()) scroll.scrollTop = scroll.scrollHeight; }
+function el(tag, cls, html){ const e=document.createElement(tag);
+  if(cls) e.className=cls; if(html!=null) e.innerHTML=html; return e; }
+function esc(s){ return String(s??"").replace(/[&<>"]/g,
+  c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function money(n){ return "$" + Number(n||0).toFixed(4); }
+
+/* ── navigation ────────────────────────────────────────────────────── */
+document.querySelectorAll(".nav").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".nav").forEach(x=>x.classList.remove("on"));
+  b.classList.add("on");
+  view = b.dataset.view;
+  render();
+});
+
+const TITLES = {
+  chat:    ["Freeform legal assistant", "Agent A · research, analysis, drafting"],
+  consult: ["Structured consultation",  "Agent B · guided intake"],
+  files:   ["Files",                    "uploads and generated documents"],
+  traces:  ["Traces",                   "tokens, cost and latency per turn"],
+};
+
+function render(){
+  const [t,s] = TITLES[view];
+  $("#hTitle").textContent = t; $("#hSub").textContent = s;
+  $("#composer").style.display = (view==="chat"||view==="consult") ? "flex" : "none";
+  $("#hPhase").style.display = view==="consult" ? "inline-block" : "none";
+  $("#mSess").textContent = session[view] || "—";
+  scroll.innerHTML = "";
+  if(view === "files") loadFiles();
+  else if(view === "traces") loadTraces();
+  else {
+    $("#input").disabled = false;
+    $("#input").placeholder = view === "chat"
+      ? "Ask a legal question, or describe a document you need…"
+      : "Describe your situation and the consultation will begin…";
+    scroll.appendChild(el("div","empty",
+      view==="chat" ? "Ask anything legal. Sources are fetched and verified before they're cited."
+                    : "Describe your situation. The assistant will ask structured questions."));
+  }
+}
+
+$("#bNew").onclick = () => {
+  session[view] = newId(view==="chat" ? "s" : "c");
+  sessionCost = 0; $("#mTotal").textContent = money(0);
+  $("#input").disabled = false;
+  $("#hPhase").textContent = "";
+  render(); loadHistory();
+};
+$("#bCancel").onclick = () =>
+  fetch(`${API}/api/turn/cancel?user_id=${USER}`, {method:"POST"});
+
+/* ── sending ───────────────────────────────────────────────────────── */
+$("#bSend").onclick = send;
+$("#input").addEventListener("keydown", e => {
+  if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(); }
+});
+
+async function send(extra){
+  if(running) return;
+  const box = $("#input");
+  const text = (extra && extra.prompt !== undefined) ? extra.prompt : box.value.trim();
+  if(!text && !extra) return;
+
+  if(scroll.querySelector(".empty")) scroll.innerHTML = "";
+  if(text){
+    const m = el("div","msg user");
+    m.appendChild(el("div","who","You"));
+    m.appendChild(el("div","bubble", esc(text)));
+    scroll.appendChild(m); toBottom(true);
+  }
+  box.value = "";
+  setRunning(true);
+
+  const body = Object.assign(
+    { prompt: text, session_id: session[view], user_id: USER }, extra || {});
+  const url = view === "consult" ? "/api/consult" : "/api/chat";
+
+  const wrap = el("div","msg");
+  wrap.appendChild(el("div","who", view==="consult" ? "Consultation" : "AI Lawyer"));
+  scroll.appendChild(wrap);
+  const status = makeStatus(wrap);
+  toBottom(true);
+
+  let bubble = null, buffered = "", raf = null;
+  const writeText = t => {
+    if(!bubble){ bubble = el("div","bubble"); wrap.appendChild(bubble); }
+    buffered += t;
+    if(raf) return;
+    // Batch DOM writes: one paint per frame instead of one per delta.
+    raf = requestAnimationFrame(() => {
+      bubble.textContent = buffered; raf = null; toBottom();
+    });
+  };
+
+  try{
+    const res = await fetch(API + url, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(body)});
+    if(!res.ok){
+      wrap.appendChild(el("div","err", esc((await res.text()).slice(0,300))));
+      setRunning(false); return;
+    }
+    const reader = res.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    while(true){
+      const {done, value} = await reader.read();
+      if(done) break;
+      buf += dec.decode(value, {stream:true});
+      const frames = buf.split("\n\n"); buf = frames.pop();
+      for(const f of frames){
+        if(f.startsWith(":")) continue;               // heartbeat
+        const line = f.split("\n").find(l => l.startsWith("data: "));
+        if(!line) continue;
+        let ev; try{ ev = JSON.parse(line.slice(6)); }catch{ continue; }
+        handle(ev, wrap, writeText, () => { bubble = null; buffered = ""; },
+               status);
+      }
+    }
+  }catch(err){
+    wrap.appendChild(el("div","err","Connection lost: " + esc(err.message)));
+  }
+  status.done();
+  setRunning(false);
+  localStorage.setItem(LAST_KEY, JSON.stringify(
+    {sid: session[view], agent: view==="consult" ? "B" : "A"}));
+  loadHistory();
+}
+
+function setRunning(on){
+  running = on;
+  $("#bSend").disabled = on;
+  $("#bSend").textContent = on ? "…" : "Send";
+  $("#bCancel").style.display = on ? "inline-block" : "none";
+}
+
+/* ── status bar ────────────────────────────────────────────────────── */
+// A 60-second research turn with only a pulsing dot feels broken. This
+// narrates what the agent is actually doing, with elapsed time.
+function makeStatus(wrap){
+  const bar = el("div","status");
+  bar.appendChild(el("div","spin"));
+  const what = el("div","what","Thinking");
+  const el_ = el("div","el","0.0s");
+  bar.appendChild(what); bar.appendChild(el_);
+  wrap.appendChild(bar);
+
+  const t0 = performance.now();
+  const active = new Map();          // tool_call_id -> label
+  let base = "Thinking", dots = 0;
+
+  const tick = setInterval(() => {
+    el_.textContent = ((performance.now()-t0)/1000).toFixed(1) + "s";
+    dots = (dots+1) % 4;
+    const n = active.size;
+    let msg = base;
+    if(n === 1) msg = [...active.values()][0];
+    else if(n > 1) msg = `Working on ${n} things`;
+    what.textContent = msg + ".".repeat(dots);
+  }, 400);
+
+  return {
+    begin(id, label){ active.set(id, label); },
+    end(id){ active.delete(id); },
+    phase(p){ base = p; },
+    hide(){ bar.style.display = "none"; },
+    show(){ bar.style.display = "flex"; },
+    done(){ clearInterval(tick); bar.remove(); },
+  };
+}
+
+// What the user should see while a tool runs, in plain language.
+const RUNNING_LABEL = {
+  web_search: a => `Searching the web for “${short(a.query)}”`,
+  web_fetch: a => `Reading ${host(a.url)}`,
+  read_cached_page: () => "Re-reading a source",
+  read_document: a => `Reading ${short(a.name || a.source, 40)}`,
+  list_files: () => "Checking your files",
+  write_document: a => `Drafting ${short(a.filename, 40)}`,
+  edit_document: a => `Revising ${short(a.source, 40)}`,
+  ask_questions: () => "Preparing questions",
+  request_file: () => "Requesting a document",
+  present_findings: () => "Summarising what it found",
+  advance_phase: a => `Moving to ${a.to || "the next stage"}`,
+  emit_drafting_handoff: () => "Preparing the drafting package",
+  emit_attorney_conclusion: () => "Writing its conclusion",
+};
+function short(v, n=48){ v = String(v||""); return v.length>n ? v.slice(0,n)+"…" : v; }
+function host(u){ try{ return new URL(u).hostname.replace(/^www\./,""); }
+  catch{ return short(u, 40); } }
+function runningLabel(name, argsPreview){
+  let a = {}; try{ a = JSON.parse(argsPreview || "{}"); }catch{}
+  const f = RUNNING_LABEL[name];
+  return f ? f(a) : name.replace(/_/g," ");
+}
+
+/* ── event handling ────────────────────────────────────────────────── */
+const chips = {};
+
+function handle(ev, wrap, writeText, resetBubble, status){
+  switch(ev.type){
+
+  case "text_delta":
+    // Text arriving means the model is talking, not working.
+    status.hide();
+    writeText(ev.text); break;
+
+  case "tool_start": {
+    resetBubble();                       // text after a tool starts a new bubble
+    status.show();
+    status.begin(ev.tool_call_id, runningLabel(ev.name, ev.args_preview));
+    const c = el("div","chip");
+    c.appendChild(el("span","dot"));
+    c.appendChild(el("span",null, esc(label(ev.name, ev.args_preview))));
+    chips[ev.tool_call_id] = c;
+    wrap.appendChild(c); toBottom(); break;
+  }
+
+  case "tool_end": {
+    status.end(ev.tool_call_id);
+    const c = chips[ev.tool_call_id];
+    if(c){ c.classList.add(ev.ok ? "done" : "fail");
+      c.appendChild(el("span","ms", ev.ms + "ms")); }
+    break;
+  }
+
+  case "usage":
+    // Between a tool finishing and the next one starting, the model is
+    // reasoning over what it just got back.
+    status.phase("Considering what it found"); break;
+
+  case "citation": {
+    const d = el("div","cite " + ev.confidence);
+    d.innerHTML = `<a href="${esc(ev.url)}" target="_blank" rel="noopener">`
+      + esc(ev.title || ev.url) + `</a><span class="tag">`
+      + (ev.confidence === "verified" ? "source located and read"
+         : ev.confidence === "partial" ? "retrieved, quotes not fully verified"
+         : "could not verify — please check this yourself") + `</span>`;
+    wrap.appendChild(d); toBottom(); break;
+  }
+
+  case "structured_block":
+    resetBubble(); status.hide(); block(ev.kind, ev.payload, wrap); break;
+
+  case "error": {
+    const cls = ev.code === "citation_warning" ? "err warnbox" : "err";
+    wrap.appendChild(el("div", cls, esc(ev.message)));
+    toBottom(); break;
+  }
+
+  case "turn_end": {
+    status.done();
+    sessionCost += (ev.cost_usd || 0);
+    $("#mCost").textContent = money(ev.cost_usd);
+    $("#mTotal").textContent = money(sessionCost);
+    const f = el("div","foot");
+    f.innerHTML =
+      `<span><b>in</b> ${ev.billed_input_tokens.toLocaleString()}</span>`
+    + `<span><b>out</b> ${ev.billed_output_tokens.toLocaleString()}</span>`
+    + `<span><b>cost</b> ${money(ev.cost_usd)}</span>`
+    + `<span><b>ttft</b> ${ev.ttft_ms ?? "—"}ms</span>`
+    + `<span><b>total</b> ${(ev.total_ms/1000).toFixed(1)}s</span>`
+    + `<span><b>${esc(ev.stop_reason)}</b></span>`;
+    wrap.appendChild(f); toBottom(); break;
+  }}
+}
+
+function label(name, args){
+  let a = ""; try{ a = JSON.parse(args || "{}"); }catch{}
+  const q = a.query || a.url || a.name || a.source || a.filename || a.to || "";
+  const verb = {
+    web_search:"Searching", web_fetch:"Reading", read_document:"Reading document",
+    read_cached_page:"Re-reading", write_document:"Writing", edit_document:"Revising",
+    list_files:"Listing files", ask_questions:"Preparing questions",
+    request_file:"Requesting a document", present_findings:"Summarising findings",
+    advance_phase:"Moving on", emit_drafting_handoff:"Preparing handoff",
+    emit_attorney_conclusion:"Concluding",
+  }[name] || name;
+  return q ? `${verb}: ${String(q).slice(0,70)}` : verb;
+}
+
+/* ── structured blocks (Agent B) ───────────────────────────────────── */
+function block(kind, p, wrap){
+  if(kind === "question_form")      wrap.appendChild(questionForm(p));
+  else if(kind === "file_request")  wrap.appendChild(fileRequest(p));
+  else if(kind === "findings")      wrap.appendChild(findings(p));
+  else if(kind === "document")      wrap.appendChild(docRow(p));
+  else if(kind === "drafting_handoff" || kind === "attorney_conclusion")
+                                    wrap.appendChild(terminal(kind, p));
+  else if(kind === "consultation_state"){
+    $("#hPhase").textContent = p.phase;
+    if(p.is_terminal){ $("#input").disabled = true;
+      $("#input").placeholder = "This consultation has concluded."; }
+  }
+  else if(kind === "citation_audit" && !p.clean){
+    wrap.appendChild(el("div","err warnbox",
+      "Citation check: " + (p.ghost_citations.length
+        ? p.ghost_citations.length + " URL(s) in this answer were never retrieved."
+        : "some cited sources could not be fully verified.")));
+  }
+  toBottom();
+}
+
+function questionForm(p){
+  const c = el("div","card");
+  c.appendChild(el("h3",null,"A few questions"));
+  if(p.context) c.appendChild(el("div","lead", esc(p.context)));
+
+  const state = {};
+  for(const q of p.questions){
+    const box = el("div","q");
+    box.appendChild(el("label",null, esc(q.prompt)
+      + (q.required === false ? ' <span class="sev">optional</span>' : "")));
+    if(q.help_text) box.appendChild(el("div","why", esc(q.help_text)));
+
+    if(q.type === "choice" || q.type === "yes_no"){
+      for(const o of q.options){
+        const l = el("label","opt");
+        l.innerHTML = `<input type="radio" name="${esc(q.id)}" value="${esc(o)}">`
+          + `<span>${esc(o)}</span>`;
+        l.querySelector("input").onchange = e => state[q.id] = e.target.value;
+        box.appendChild(l);
+      }
+    } else if(q.type === "multi_choice"){
+      state[q.id] = [];
+      for(const o of q.options){
+        const l = el("label","opt");
+        l.innerHTML = `<input type="checkbox" value="${esc(o)}"><span>${esc(o)}</span>`;
+        l.querySelector("input").onchange = e => {
+          const s = new Set(state[q.id]);
+          e.target.checked ? s.add(o) : s.delete(o);
+          state[q.id] = [...s];
+        };
+        box.appendChild(l);
+      }
+    } else {
+      const i = q.type === "long_text" ? el("textarea") : el("input");
+      if(q.type === "long_text") i.rows = 3;
+      if(q.type === "number") i.type = "number";
+      if(q.type === "date") i.type = "date";
+      i.oninput = e => state[q.id] = e.target.value;
+      box.appendChild(i);
+    }
+    c.appendChild(box);
+  }
+
+  const b = el("button","btn","Submit answers");
+  b.onclick = () => {
+    const answers = {};
+    for(const [k,v] of Object.entries(state)){
+      const val = Array.isArray(v) ? v.join(", ") : v;
+      if(val !== "" && val != null) answers[k] = val;
+    }
+    if(!Object.keys(answers).length) return;
+    c.querySelectorAll("input,textarea,button").forEach(x => x.disabled = true);
+    b.textContent = "Submitted";
+    send({ prompt:"", answers });
+  };
+  c.appendChild(b);
+  return c;
+}
+
+function fileRequest(p){
+  const c = el("div","card");
+  c.appendChild(el("h3",null,"Document requested"));
+  c.appendChild(el("div","lead","<b>" + esc(p.document_name) + "</b><br>"
+    + esc(p.reason)));
+  if(p.alternative_if_unavailable)
+    c.appendChild(el("div","why","If you skip: " + esc(p.alternative_if_unavailable)));
+
+  const bar = el("div",null);
+  bar.style.cssText = "display:flex;gap:8px;margin-top:12px";
+  const up = el("button","btn","Upload");
+  const file = el("input"); file.type="file"; file.style.display="none";
+  up.onclick = () => file.click();
+  file.onchange = async () => {
+    if(!file.files[0]) return;
+    const fd = new FormData(); fd.append("file", file.files[0]);
+    await fetch(`${API}/api/files?user_id=${USER}`, {method:"POST", body:fd});
+    bar.querySelectorAll("button").forEach(x => x.disabled = true);
+    send({ prompt:"I've uploaded " + file.files[0].name });
+  };
+  const skip = el("button","btn ghost","Skip — I don't have it");
+  skip.onclick = () => {
+    bar.querySelectorAll("button").forEach(x => x.disabled = true);
+    send({ prompt:"", skip_file: p.document_name });
+  };
+  bar.appendChild(up); bar.appendChild(skip); bar.appendChild(file);
+  c.appendChild(bar);
+  return c;
+}
+
+function findings(p){
+  const c = el("div","card");
+  c.appendChild(el("h3",null,"Findings"));
+  for(const f of p.findings){
+    const d = el("div","finding " + (f.severity||"info"));
+    d.appendChild(el("div","t", esc(f.title)
+      + `<span class="sev">${esc(f.severity||"info")}</span>`));
+    d.appendChild(el("div","s", esc(f.summary)));
+    for(const s of (f.sources||[]))
+      d.appendChild(el("div","cite " + (s.confidence||"unverified"),
+        `<a href="${esc(s.url)}" target="_blank" rel="noopener">`
+        + esc(s.title || s.url) + "</a>"));
+    c.appendChild(d);
+  }
+  return c;
+}
+
+function docRow(p){
+  const d = el("div","doc");
+  d.appendChild(el("div","grow",
+    `<div class="nm">${esc(p.filename)}</div><div class="sm">`
+    + `${p.word_count||0} words`
+    + (p.placeholders && p.placeholders.length
+       ? ` · ${p.placeholders.length} placeholder(s) to fill` : "")
+    + `</div>`));
+  const a = el("a"); a.href = API + p.download_url; a.download = "";
+  a.appendChild(el("button","btn sm","Download"));
+  d.appendChild(a);
+  return d;
+}
+
+function terminal(kind, p){
+  const c = el("div","card");
+  c.appendChild(el("h3",null, kind === "drafting_handoff"
+    ? "Drafting handoff" : "Attorney consultation recommended"));
+  c.appendChild(el("div","lead", kind === "drafting_handoff"
+    ? esc(p.document_type) + " · " + esc(p.jurisdiction)
+    : esc(p.summary)));
+  if(kind === "attorney_conclusion"){
+    c.appendChild(el("div","why","Urgency: " + esc(p.urgency)
+      + " · " + esc(p.practice_area)));
+    for(const s of (p.recommended_next_steps||[]))
+      c.appendChild(el("div","finding notable", esc(s)));
+  }
+  const pre = el("pre", null, esc(JSON.stringify(p, null, 2)));
+  const t = el("button","btn ghost sm","Show machine-readable package");
+  pre.style.display = "none";
+  t.onclick = () => { pre.style.display = pre.style.display==="none" ? "block":"none"; };
+  const copy = el("button","btn ghost sm","Copy JSON");
+  copy.style.marginLeft = "8px";
+  copy.onclick = () => { navigator.clipboard.writeText(JSON.stringify(p,null,2));
+    copy.textContent = "Copied"; };
+  c.appendChild(t); c.appendChild(copy); c.appendChild(pre);
+  return c;
+}
+
+/* ── session history ───────────────────────────────────────────────── */
+// The spec requires the UI to rehydrate after a reload or dropped
+// connection. Every turn is already on the volume; this reads it back.
+const LAST_KEY = "ailaw:last:" + USER;
+
+async function loadHistory(){
+  const box = $("#hist");
+  box.innerHTML = '<div class="hd">Recent</div>';
+  let d;
+  try{
+    d = await (await fetch(`${API}/api/sessions?user_id=${USER}`)).json();
+  }catch{ return; }
+
+  for(const sess of (d.sessions||[])){
+    const row = el("div","sess" + (sess.session_id===session[view] ? " on":""));
+    const ag = el("span","ag " + (sess.agent||"A"), sess.agent||"A");
+    const t  = el("span","t", esc(sess.title));
+    const x  = el("span","x","×");
+    x.title = "Delete";
+    x.onclick = async ev => {
+      ev.stopPropagation();
+      await fetch(`${API}/api/sessions/${sess.session_id}?user_id=${USER}`,
+                  {method:"DELETE"});
+      loadHistory();
+    };
+    row.appendChild(ag); row.appendChild(t); row.appendChild(x);
+    row.onclick = () => openSession(sess.session_id, sess.agent||"A");
+    box.appendChild(row);
+  }
+}
+
+async function openSession(sid, agent){
+  // Switch to the right agent's view, then replay the stored transcript.
+  const target = agent === "B" ? "consult" : "chat";
+  if(view !== target){
+    document.querySelectorAll(".nav").forEach(x=>x.classList.remove("on"));
+    document.querySelector(`.nav[data-view="${target}"]`).classList.add("on");
+    view = target;
+  }
+  session[view] = sid;
+  localStorage.setItem(LAST_KEY, JSON.stringify({sid, agent}));
+
+  const [t,sub] = TITLES[view];
+  $("#hTitle").textContent = t; $("#hSub").textContent = sub;
+  $("#composer").style.display = "flex";
+  $("#hPhase").style.display = view==="consult" ? "inline-block" : "none";
+  $("#mSess").textContent = sid;
+  scroll.innerHTML = "";
+
+  let d;
+  try{
+    d = await (await fetch(`${API}/api/sessions/${sid}/transcript?user_id=${USER}`)).json();
+  }catch{
+    scroll.appendChild(el("div","empty","Could not load that conversation."));
+    return;
+  }
+  if(!d.transcript || !d.transcript.length){
+    scroll.appendChild(el("div","empty","This conversation is empty."));
+    return;
+  }
+
+  scroll.appendChild(el("div","replay",
+    `${d.turn_count} turn(s) · restored from storage`));
+
+  for(const item of d.transcript){
+    const m = el("div","msg" + (item.role==="user" ? " user":""));
+    m.appendChild(el("div","who", item.role==="user" ? "You" : "AI Lawyer"));
+    if(item.tools_used && item.tools_used.length){
+      const seen = [];
+      for(const name of item.tools_used){
+        if(seen.includes(name)) continue;
+        seen.push(name);
+        const c = el("div","chip done");
+        c.appendChild(el("span","dot"));
+        c.appendChild(el("span",null, esc(label(name,"{}"))));
+        m.appendChild(c);
+      }
+    }
+    if(item.text && item.text.trim())
+      m.appendChild(el("div","bubble", esc(item.text)));
+    scroll.appendChild(m);
+  }
+
+  // Agent B: restore the phase badge and lock a concluded consultation.
+  if(view === "consult"){
+    try{
+      const st = await (await fetch(
+        `${API}/api/consult/${sid}/state?user_id=${USER}`)).json();
+      $("#hPhase").textContent = st.state.phase;
+      if(st.is_terminal){
+        $("#input").disabled = true;
+        $("#input").placeholder = "This consultation has concluded.";
+        if(st.terminal_payload)
+          scroll.appendChild(terminal(st.terminal_kind, st.terminal_payload));
+      }
+    }catch{}
+  }
+
+  toBottom(true);
+  loadHistory();
+}
+
+/* ── files ─────────────────────────────────────────────────────────── */
+async function loadFiles(){
+  const drop = el("div","drop","Drop a file here, or click to choose  ·  "
+    + "PDF, DOCX, XLSX, CSV, TXT, images  ·  10&nbsp;MB max");
+  const picker = el("input"); picker.type="file"; picker.style.display="none";
+  drop.onclick = () => picker.click();
+  drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+  drop.ondragleave = () => drop.classList.remove("over");
+  drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over");
+    if(e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]); };
+  picker.onchange = () => picker.files[0] && upload(picker.files[0]);
+  scroll.appendChild(drop); scroll.appendChild(picker);
+
+  const list = el("div"); scroll.appendChild(list);
+  let d; try{
+    d = await (await fetch(`${API}/api/files?user_id=${USER}`)).json();
+  }catch{ list.appendChild(el("div","empty","Could not load files.")); return; }
+
+  for(const [area, label] of [["uploads","Uploaded"],["outputs","Generated"]]){
+    const items = (d.files||{})[area] || [];
+    const h = el("div","who", label + " · " + items.length);
+    h.style.marginTop = "18px"; list.appendChild(h);
+    if(!items.length){ list.appendChild(el("div","sm","—")); continue; }
+    for(const f of items){
+      const r = el("div","row");
+      r.appendChild(el("div","grow",
+        `<div class="nm">${esc(f.name)}</div>`
+        + `<div class="sm">${esc((f.ext||"").replace(".",""))}`
+        + (f.bytes ? " · " + Math.round(f.bytes/1024) + " KB" : "") + `</div>`));
+      const dl = el("a"); dl.href = `${API}/api/files/${area}/${encodeURIComponent(f.name)}?user_id=${USER}`;
+      dl.download = ""; dl.appendChild(el("button","btn ghost sm","Download"));
+      const del = el("button","btn ghost sm","Delete");
+      del.onclick = async () => {
+        await fetch(`${API}/api/files/${area}/${encodeURIComponent(f.name)}?user_id=${USER}`,
+          {method:"DELETE"});
+        render();
+      };
+      r.appendChild(dl); r.appendChild(del);
+      list.appendChild(r);
+    }
+  }
+}
+
+async function upload(file){
+  const fd = new FormData(); fd.append("file", file);
+  const r = await fetch(`${API}/api/files?user_id=${USER}`, {method:"POST", body:fd});
+  if(!r.ok){ alert((await r.json()).detail || "Upload failed"); return; }
+  render();
+}
+
+/* ── traces ────────────────────────────────────────────────────────── */
+async function loadTraces(){
+  let d; try{
+    d = await (await fetch(`${API}/api/traces?limit=25`)).json();
+  }catch{ scroll.appendChild(el("div","empty","Could not load traces.")); return; }
+  if(!d.traces || !d.traces.length){
+    scroll.appendChild(el("div","empty","No traces yet. Run a turn first."));
+    return;
+  }
+  for(const t of d.traces){
+    const r = el("div","row");
+    r.appendChild(el("div","grow",
+      `<div class="nm">${esc(t.turn_id)} <span class="sev">`
+      + `${esc(t.agent||"A")}</span></div>`
+      + `<div class="sm">${esc(t.stop_reason||"")} · `
+      + `${money(t.cost_usd)} · ${((t.total_ms||0)/1000).toFixed(1)}s</div>`));
+    const b = el("button","btn ghost sm","Open");
+    b.onclick = () => showTrace(t.turn_id);
+    r.appendChild(b);
+    scroll.appendChild(r);
+  }
+}
+
+async function showTrace(id){
+  scroll.innerHTML = "";
+  const back = el("button","btn ghost sm","← All traces");
+  back.onclick = () => render(); scroll.appendChild(back);
+  let t; try{
+    t = await (await fetch(`${API}/api/trace/${id}`)).json();
+  }catch{ scroll.appendChild(el("div","empty","Trace not found.")); return; }
+
+  const s = el("div","card");
+  s.appendChild(el("h3",null,"Turn " + esc(id)));
+  s.appendChild(el("div","foot",
+    `<span><b>in</b> ${t.totals.input_tokens.toLocaleString()}</span>`
+  + `<span><b>cache read</b> ${t.totals.cache_read.toLocaleString()}</span>`
+  + `<span><b>out</b> ${t.totals.output_tokens.toLocaleString()}</span>`
+  + `<span><b>cost</b> ${money(t.totals.cost_usd)}</span>`
+  + `<span><b>model time</b> ${(t.latency_breakdown.model_ms/1000).toFixed(1)}s</span>`
+  + `<span><b>tool time</b> ${(t.latency_breakdown.tool_ms/1000).toFixed(1)}s</span>`
+  + (t.pricing_verified ? "" : `<span style="color:var(--warn)"><b>pricing unverified</b></span>`)));
+  scroll.appendChild(s);
+
+  const sp = el("div","card");
+  sp.appendChild(el("h3",null,"Spans"));
+  for(const x of t.spans){
+    const row = el("div","span");
+    row.appendChild(el("div","k", esc(x.kind)));
+    row.appendChild(el("div",null, esc(x.name)
+      + (x.input ? ` <span class="sm">in ${x.input} out ${x.output}</span>` : "")
+      + (x.summary ? ` <span class="sm">${esc(String(x.summary).slice(0,80))}</span>` : "")));
+    row.appendChild(el("div","k", (x.ms||0) + "ms"));
+    sp.appendChild(row);
+  }
+  scroll.appendChild(sp);
+}
+
+render();
+loadHistory();
+
+// Rehydrate on load — a reload should not lose the conversation.
+try{
+  const last = JSON.parse(localStorage.getItem(LAST_KEY) || "null");
+  if(last && last.sid) openSession(last.sid, last.agent);
+}catch{}
+</script>
+</body>
+</html>

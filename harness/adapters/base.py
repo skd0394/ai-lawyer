@@ -55,6 +55,17 @@ class ModelAdapter(Protocol):
         """
         ...
 
+    def format_messages(self, messages: list[dict],
+                        cache: bool = False) -> list[dict]:
+        """Optionally mark a ROLLING cache breakpoint on the last message.
+
+        Within one turn the loop makes many calls, and call N's prefix is
+        call N-1's messages plus one tool result. That prefix is stable and
+        cacheable — including the accumulated search results and page
+        extracts, which is where the bulk of a research turn's input lives.
+        """
+        ...
+
     def format_system(self, system: Any, cache: bool = False) -> Any:
         """Plain system text -> provider format, optionally cache-marked."""
         ...

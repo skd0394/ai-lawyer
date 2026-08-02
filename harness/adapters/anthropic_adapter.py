@@ -123,6 +123,43 @@ class AnthropicAdapter:
                 await asyncio.sleep(backoff)
 
     # ── 2. tool + message construction (provider-specific, lives here) ────
+    def format_messages(self, messages: list[dict],
+                        cache: bool = False) -> list[dict]:
+        """Rolling breakpoint on the final message.
+
+        The static breakpoints (system prompt, tool definitions) cover only
+        ~2,700 tokens. By mid-turn the history holds thousands of tokens of
+        research results that are equally stable and were being re-billed at
+        full price on every call.
+
+        Anthropic allows up to 4 breakpoints; system + tools + this = 3.
+
+        NOTE the copies. Mutating the caller's messages would write
+        cache_control into the session store, and it would then be replayed
+        into every future turn.
+        """
+        if not cache or not messages:
+            return messages
+
+        out = list(messages)
+        last = dict(out[-1])
+        content = last.get("content")
+
+        if isinstance(content, str):
+            last["content"] = [{"type": "text", "text": content,
+                                "cache_control": {"type": "ephemeral"}}]
+        elif isinstance(content, list) and content:
+            blocks = [dict(b) if isinstance(b, dict) else b for b in content]
+            if isinstance(blocks[-1], dict):
+                blocks[-1] = {**blocks[-1],
+                              "cache_control": {"type": "ephemeral"}}
+            last["content"] = blocks
+        else:
+            return messages
+
+        out[-1] = last
+        return out
+
     def format_system(self, system: Any, cache: bool = False) -> Any:
         """Cache breakpoint #2, after the system prompt.
 

@@ -36,6 +36,10 @@ api_image = (
     # Modal only auto-mounts the entrypoint file, not your packages.
     .add_local_python_source("harness", "infra", "obs", "sandbox",
                              "agents")
+    # Single self-contained HTML file — no build step, no node_modules, no
+    # dist/ to go stale. The brief weights the frontend at 30%; this keeps
+    # the deploy surface at one file.
+    .add_local_dir("frontend", remote_path="/frontend")
 )
 
 sandbox_image = (
@@ -1725,11 +1729,11 @@ def fastapi_app():
                 task.cancel()
                 try:
                     new_messages = messages[turn_start_index:]
-                    if len(new_messages) > 1:
+                    if new_messages:      # see the note in /api/chat
                         store.append_turn(make_turn_record(
                             turn_id=turn_id, prompt=user_text,
                             messages=new_messages,
-                            stop_reason=tracer.stop_reason,
+                            stop_reason=tracer.stop_reason or "disconnected",
                             usage=tracer.totals, agent="B"))
                     save_consult_state(req.user_id, req.session_id, st)
                 except Exception as e:
@@ -2466,12 +2470,22 @@ def fastapi_app():
                 # (and rebuild_messages repairs anything it missed).
                 try:
                     new_messages = messages[turn_start_index:]
-                    if len(new_messages) > 1:        # more than just the prompt
+                    # Persist whenever the turn produced ANYTHING, including
+                    # just the user's message. A client that disconnects
+                    # before the first model response completes previously
+                    # lost the user's text entirely — the spec requires that
+                    # dropped connections do not lose state.
+                    #
+                    # KNOWN GAP: the in-flight response is still lost. Fully
+                    # continuing a turn after disconnect requires decoupling
+                    # execution from the request lifecycle (a durable queue,
+                    # or a Modal Function per turn). See LIMITATIONS.md.
+                    if new_messages:
                         store.append_turn(make_turn_record(
                             turn_id=turn_id,
                             prompt=req.prompt,
                             messages=new_messages,
-                            stop_reason=tracer.stop_reason,
+                            stop_reason=tracer.stop_reason or "disconnected",
                             usage=tracer.totals,
                             agent=req.agent,
                         ))
@@ -2497,6 +2511,17 @@ def fastapi_app():
                 "X-Turn-Id": turn_id,
             },
         )
+
+    @web_app.get("/")
+    def index():
+        from fastapi.responses import HTMLResponse, PlainTextResponse
+        from pathlib import Path as _P
+        f = _P("/frontend/index.html")
+        if not f.exists():
+            return PlainTextResponse(
+                "frontend/index.html was not shipped into the image — check "
+                "add_local_dir in modal_app.py", status_code=500)
+        return HTMLResponse(f.read_text())
 
     @web_app.get("/debug")
     def debug_page():
@@ -2863,6 +2888,86 @@ def fastapi_app():
                 "cases": cases}
 
     # ── T3.1 — session retrieval ──────────────────────────────────────────
+    @web_app.get("/api/sessions")
+    def list_sessions(user_id: str = "kartik", limit: int = 40):
+        """Enumerate a user's sessions for the history sidebar.
+
+        The title is the first user prompt of the session — no separate
+        metadata file, so sessions created before this endpoint existed
+        still show up.
+        """
+        import json as _json
+        import os as _os
+        from infra.session_store import user_volume
+
+        vol = user_volume(user_id)
+        try:
+            vol.reload()
+        except Exception:
+            pass
+
+        try:
+            entries = list(vol.listdir("sessions"))
+        except Exception:
+            return {"sessions": []}
+
+        out = []
+        for e in entries:
+            path = getattr(e, "path", str(e))
+            sid = _os.path.basename(path.rstrip("/"))
+            if not sid:
+                continue
+            try:
+                # Only the head of the file: enough for a title and a
+                # timestamp without reading a whole conversation.
+                head = b""
+                for chunk in vol.read_file(f"sessions/{sid}/turns.jsonl"):
+                    head += chunk
+                    if len(head) > 4096:
+                        break
+            except Exception:
+                continue
+
+            lines = head.decode("utf-8", "replace").splitlines()
+            first = None
+            for ln in lines:
+                try:
+                    first = _json.loads(ln)
+                    break
+                except Exception:
+                    continue
+            if not first:
+                continue
+
+            out.append({
+                "session_id": sid,
+                "agent": first.get("agent", "A"),
+                "title": (first.get("prompt") or "(untitled)")[:90],
+                "started_at": first.get("at"),
+                # Cheap approximation; the transcript endpoint is exact.
+                "turns_seen": len([l for l in lines if l.strip()]),
+            })
+
+        out.sort(key=lambda x: x.get("started_at") or 0, reverse=True)
+        return {"sessions": out[:limit]}
+
+    @web_app.delete("/api/sessions/{session_id}")
+    def delete_session(session_id: str, user_id: str = "kartik"):
+        from infra.session_store import user_volume
+        vol = user_volume(user_id)
+        removed = []
+        for name in ("turns.jsonl", "state.json"):
+            try:
+                vol.remove_file(f"sessions/{session_id}/{name}")
+                removed.append(name)
+            except Exception:
+                pass
+        try:
+            vol.commit()
+        except Exception:
+            pass
+        return {"deleted": bool(removed), "removed": removed}
+
     @web_app.get("/api/sessions/{session_id}/transcript")
     def get_transcript(session_id: str, user_id: str = "kartik"):
         """Spec: 'Session history is retrievable as a full ordered

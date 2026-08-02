@@ -1,0 +1,137 @@
+[
+  {
+    "test": "provider error does not hang",
+    "pass": true,
+    "detail": "4s"
+  },
+  {
+    "test": "error surfaced as an event",
+    "pass": true,
+    "detail": "NotFoundError: Error code: 404 - {'type': 'error', 'error': {'type': 'not_found_error', 'message': 'model: claude-does-not-exist-99'}, 'request_id': '"
+  },
+  {
+    "test": "stream closed cleanly (turn_end present)",
+    "pass": true,
+    "detail": ""
+  },
+  {
+    "test": "lock released after failure",
+    "pass": true,
+    "detail": "{'running': False, 'turn_id': '038a03d5cdee', 'session_id': 'res-prov-1785650875', 'cancel_requested': False, 'age_s': 3}"
+  },
+  {
+    "test": "tool failure does not hang",
+    "pass": true,
+    "detail": ""
+  },
+  {
+    "test": "failing tool reported ok=false",
+    "pass": true,
+    "detail": "could not retrieve https://this-domain-does-not-exist-xyz-99871.example/page"
+  },
+  {
+    "test": "turn completed despite the failure",
+    "pass": true,
+    "detail": "stop"
+  },
+  {
+    "test": "model explained rather than crashing",
+    "pass": true,
+    "detail": "That page could not be retrieved \u2014 the domain doesn't exist / can't be resolved (DNS lookup failure). I have no cached o"
+  },
+  {
+    "test": "client disconnected mid-stream",
+    "pass": true,
+    "detail": "curl killed after 4s"
+  },
+  {
+    "test": "user's message persisted despite the disconnect",
+    "pass": true,
+    "detail": "turn_count=1"
+  },
+  {
+    "test": "session history is valid after the disconnect",
+    "pass": true,
+    "detail": "{'valid': True, 'orphaned_tool_use_ids': []}"
+  },
+  {
+    "test": "lock released after the disconnect",
+    "pass": true,
+    "detail": "{'running': False, 'turn_id': '060a1fc042f3', 'session_id': 'res-drop-1785650894', 'cancel_requested': False, 'age_s': 32}"
+  },
+  {
+    "test": "cancel accepted while running",
+    "pass": true,
+    "detail": "{'cancelled': True, 'turn_id': 'ea67a3bd326f'}"
+  },
+  {
+    "test": "turn ended as cancelled",
+    "pass": true,
+    "detail": "cancelled"
+  },
+  {
+    "test": "session still valid after cancel (no orphaned tool calls)",
+    "pass": true,
+    "detail": "{'valid': True, 'orphaned_tool_use_ids': []}"
+  },
+  {
+    "test": "session usable after cancel",
+    "pass": true,
+    "detail": "stop"
+  },
+  {
+    "test": "sandbox terminated mid-turn",
+    "pass": true,
+    "detail": ""
+  },
+  {
+    "test": "request did not hang",
+    "pass": true,
+    "detail": ""
+  },
+  {
+    "test": "stream closed with a turn_end or an error",
+    "pass": true,
+    "detail": "24 events"
+  },
+  {
+    "test": "next turn recovers on a fresh sandbox",
+    "pass": true,
+    "detail": "stop"
+  },
+  {
+    "test": "sandbox destroyed between turns",
+    "pass": true,
+    "detail": ""
+  },
+  {
+    "test": "context reconstructed after recycling",
+    "pass": true,
+    "detail": "The reference number you gave was QX-4471."
+  },
+  {
+    "test": "second concurrent turn rejected with 409",
+    "pass": true,
+    "detail": "409"
+  },
+  {
+    "test": "12MB upload rejected with 413",
+    "pass": true,
+    "detail": "413"
+  },
+  {
+    "test": "shell script rejected with 400",
+    "pass": true,
+    "detail": "400"
+  },
+  {
+    "test": "worker self-test fully passes",
+    "pass": true,
+    "detail": "14/14"
+  },
+  {
+    "test": "no credentials present inside the sandbox",
+    "pass": true,
+    "detail": "{'suspicious_keys': [], 'env_var_count': 31}"
+  }
+]

@@ -1,0 +1,990 @@
+{
+  "at": 1785616250.104352,
+  "base": "https://docdraft-developers-kartik--ailaw-kartik-fastapi-app.modal.run",
+  "user": "bench",
+  "runs_per_query": 5,
+  "pricing_verified": true,
+  "queries": {
+    "employment": {
+      "cold": {
+        "ok": true,
+        "turn_id": null,
+        "stop_reason": "stop",
+        "input": 35065,
+        "output": 7533,
+        "total": 42598,
+        "cost": 0.168557,
+        "ttft_ms": 4558,
+        "total_ms": 94345,
+        "wall_ms": 101246,
+        "uncached_input": 10,
+        "cache_read": 22007,
+        "cache_write": 13048,
+        "model_calls": 5,
+        "by_model": {
+          "claude-sonnet-5": 5
+        },
+        "tool_calls": 6,
+        "tools": [
+          "web_search",
+          "web_search",
+          "web_fetch",
+          "web_search",
+          "web_fetch",
+          "write_document"
+        ],
+        "searches": 3,
+        "fetches": 2,
+        "citations": {
+          "verified": 2
+        },
+        "document": "Employment Agreement - Fintech Startup NYC (New York Law) - v2.docx",
+        "words": 2393,
+        "placeholders": 18,
+        "answer_chars": 2822
+      },
+      "runs": [
+        {
+          "ok": true,
+          "turn_id": null,
+          "stop_reason": "stop",
+          "input": 26879,
+          "output": 6567,
+          "total": 33446,
+          "cost": 0.138358,
+          "ttft_ms": 5821,
+          "total_ms": 81593,
+          "wall_ms": 87281,
+          "uncached_input": 8,
+          "cache_read": 17663,
+          "cache_write": 9208,
+          "model_calls": 4,
+          "by_model": {
+            "claude-sonnet-5": 4
+          },
+          "tool_calls": 5,
+          "tools": [
+            "web_search",
+            "web_search",
+            "web_fetch",
+            "web_search",
+            "write_document"
+          ],
+          "searches": 3,
+          "fetches": 1,
+          "citations": {
+            "verified": 1
+          },
+          "document": "Employment Agreement - Fintech Startup NYC (New York Law) - New Draft 3.docx",
+          "words": 1883,
+          "placeholders": 23,
+          "answer_chars": 2627
+        },
+        {
+          "ok": true,
+          "turn_id": null,
+          "stop_reason": "stop",
+          "input": 26954,
+          "output": 6051,
+          "total": 33005,
+          "cost": 0.12975,
+          "ttft_ms": 4737,
+          "total_ms": 84245,
+          "wall_ms": 89850,
+          "uncached_input": 8,
+          "cache_read": 17996,
+          "cache_write": 8950,
+          "model_calls": 4,
+          "by_model": {
+            "claude-sonnet-5": 4
+          },
+          "tool_calls": 5,
+          "tools": [
+            "web_search",
+            "web_search",
+            "web_fetch",
+            "web_fetch",
+            "write_document"
+          ],
+          "searches": 2,
+          "fetches": 2,
+          "citations": {
+            "verified": 2
+          },
+          "document": "Employment Agreement - Fintech Startup NYC (New York Law) - New Draft 4.docx",
+          "words": 1782,
+          "placeholders": 20,
+          "answer_chars": 2515
+        },
+        {
+          "ok": true,
+          "turn_id": null,
+          "stop_reason": "stop",
+          "input": 26992,
+          "output": 6032,
+          "total": 33024,
+          "cost": 0.12931,
+          "ttft_ms": 4677,
+          "total_ms": 78802,
+          "wall_ms": 85452,
+          "uncached_input": 8,
+          "cache_read": 18082,
+          "cache_write": 8902,
+          "model_calls": 4,
+          "by_model": {
+            "claude-sonnet-5": 4
+          },
+          "tool_calls": 5,
+          "tools": [
+            "web_search",
+            "web_search",
+            "web_fetch",
+            "web_fetch",
+            "write_document"
+          ],
+          "searches": 2,
+          "fetches": 2,
+          "citations": {
+            "verified": 2
+          },
+          "document": "Employment Agreement - Fintech Startup NYC (New York Law) - New Draft 5.docx",
+          "words": 1717,
+          "placeholders": 17,
+          "answer_chars": 2511
+        },
+        {
+          "ok": true,
+          "turn_id": null,
+          "stop_reason": "stop",
+          "input": 26410,
+          "output": 5827,
+          "total": 32237,
+          "cost": 0.12496,
+          "ttft_ms": 5568,
+          "total_ms": 69941,
+          "wall_ms": 78974,
+          "uncached_input": 8,
+          "cache_read": 17819,
+          "cache_write": 8583,
+          "model_calls": 4,
+          "by_model": {
+            "claude-sonnet-5": 4
+          },
+          "tool_calls": 5,
+          "tools": [
+            "web_search",
+            "web_search",
+            "web_fetch",
+            "web_search",
+            "write_document"
+          ],
+          "searches": 3,
+          "fetches": 1,
+          "citations": {
+            "verified": 1
+          },
+          "document": "Employment Agreement - Fintech Startup NYC (New York Law) - New Draft 6.docx",
+          "words": 1723,
+          "placeholders": 18,
+          "answer_chars": 2225
+        },
+        {
+          "ok": true,
+          "turn_id": null,
+          "stop_reason": "stop",
+          "input": 27554,
+          "output": 6881,
+          "total": 34435,
+          "cost": 0.143556,
+          "ttft_ms": 8039,
+          "total_ms": 91537,
+          "wall_ms": 97405,
+          "uncached_input": 8,
+          "cache_read": 18255,
+          "cache_write": 9291,
+          "model_calls": 4,
+          "by_model": {
+            "claude-sonnet-5": 4
+          },
+          "tool_calls": 5,
+          "tools": [
+            "web_search",
+            "web_search",
+            "web_fetch",
+            "web_fetch",
+            "write_document"
+          ],
+          "searches": 2,
+          "fetches": 2,
+          "citations": {
+            "verified": 2
+          },
+          "document": "Employment Agreement - Fintech Startup NYC (New York Law) - New Draft 8.docx",
+          "words": 1997,
+          "placeholders": 15,
+          "answer_chars": 2609
+        }
+      ],
+      "valid": 5,
+      "attempted": 5,
+      "stats": {
+        "input": {
+          "avg": 26957.8,
+          "med": 26954,
+          "min": 26410,
+          "max": 27554
+        },
+        "output": {
+          "avg": 6271.6,
+          "med": 6051,
+          "min": 5827,
+          "max": 6881
+        },
+        "total": {
+          "avg": 33229.4,
+          "med": 33024,
+          "min": 32237,
+          "max": 34435
+        },
+        "cost": {
+          "avg": 0.1332,
+          "med": 0.1298,
+          "min": 0.12496,
+          "max": 0.143556
+        },
+        "total_ms": {
+          "avg": 81223.6,
+          "med": 81593,
+          "min": 69941,
+          "max": 91537
+        },
+        "ttft_ms": {
+          "avg": 5768.4,
+          "med": 5568,
+          "min": 4677,
+          "max": 8039
+        },
+        "cache_read": {
+          "avg": 17963,
+          "med": 17996,
+          "min": 17663,
+          "max": 18255
+        },
+        "cache_write": {
+          "avg": 8986.8,
+          "med": 8950,
+          "min": 8583,
+          "max": 9291
+        },
+        "uncached_input": {
+          "avg": 8,
+          "med": 8,
+          "min": 8,
+          "max": 8
+        },
+        "tool_calls": {
+          "avg": 5,
+          "med": 5,
+          "min": 5,
+          "max": 5
+        },
+        "searches": {
+          "avg": 2.4,
+          "med": 2,
+          "min": 2,
+          "max": 3
+        },
+        "fetches": {
+          "avg": 1.6,
+          "med": 2,
+          "min": 1,
+          "max": 2
+        },
+        "model_calls": {
+          "avg": 4,
+          "med": 4,
+          "min": 4,
+          "max": 4
+        },
+        "words": {
+          "avg": 1820.4,
+          "med": 1782,
+          "min": 1717,
+          "max": 1997
+        },
+        "placeholders": {
+          "avg": 18.6,
+          "med": 18,
+          "min": 15,
+          "max": 23
+        }
+      }
+    },
+    "demand": {
+      "cold": {
+        "ok": true,
+        "turn_id": null,
+        "stop_reason": "stop",
+        "input": 54649,
+        "output": 3818,
+        "total": 58467,
+        "cost": 0.100418,
+        "ttft_ms": 3446,
+        "total_ms": 48734,
+        "wall_ms": 54542,
+        "uncached_input": 16,
+        "cache_read": 46891,
+        "cache_write": 7742,
+        "model_calls": 8,
+        "by_model": {
+          "claude-sonnet-5": 8
+        },
+        "tool_calls": 8,
+        "tools": [
+          "web_search",
+          "web_search",
+          "web_fetch",
+          "web_fetch",
+          "web_fetch",
+          "web_fetch",
+          "web_search",
+          "write_document"
+        ],
+        "searches": 3,
+        "fetches": 4,
+        "citations": {
+          "verified": 1,
+          "unverified": 3
+        },
+        "document": "Demand Letter - Unpaid Invoices ($18,500 - Marketing Agency - Austin TX) - Texas Law.docx",
+        "words": 557,
+        "placeholders": 21,
+        "answer_chars": 2144
+      },
+      "runs": [
+        {
+          "ok": true,
+          "turn_id": null,
+          "stop_reason": "stop",
+          "input": 64154,
+          "output": 5758,
+          "total": 69912,
+          "cost": 0.146292,
+          "ttft_ms": 3684,
+          "total_ms": 68603,
+          "wall_ms": 72966,
+          "uncached_input": 14,
+          "cache_read": 52361,
+          "cache_write": 11779,
+          "model_calls": 7,
+          "by_model": {
+            "claude-sonnet-5": 7
+          },
+          "tool_calls": 8,
+          "tools": [
+            "read_document",
+            "web_search",
+            "web_search",
+            "web_fetch",
+            "web_fetch",
+            "web_fetch",
+            "web_fetch",
+            "write_document"
+          ],
+          "searches": 2,
+          "fetches": 4,
+          "citations": {
+            "verified": 3,
+            "unverified": 1
+          },
+          "document": "Demand Letter - Unpaid Invoices ($18,500 - Marketing Agency - Austin TX) - Verified.docx",
+          "words": 923,
+          "placeholders": 23,
+          "answer_chars": 2091
+        },
+        {
+          "ok": true,
+          "turn_id": null,
+          "stop_reason": "stop",
+          "input": 111589,
+          "output": 5674,
+          "total": 117263,
+          "cost": 0.155861,
+          "ttft_ms": 4019,
+          "total_ms": 85478,
+          "wall_ms": 90666,
+          "uncached_input": 26,
+          "cache_read": 100779,
+          "cache_write": 10784,
+          "model_calls": 13,
+          "by_model": {
+            "claude-sonnet-5": 13
+          },
+          "tool_calls": 13,
+          "tools": [
+            "web_search",
+            "web_search",
+            "web_search",
+            "web_fetch",
+            "web_fetch",
+            "read_cached_page",
+            "web_fetch",
+            "web_search",
+            "web_fetch",
+            "web_fetch",
+            "web_fetch",
+            "web_fetch",
+            "write_document"
+          ],
+          "searches": 4,
+          "fetches": 7,
+          "citations": {
+            "verified": 4,
+            "unverified": 2
+          },
+          "document": "Demand Letter - Unpaid Invoices ($18,500 - Marketing Agency - Austin TX) - Draft 3.docx",
+          "words": 527,
+          "placeholders": 20,
+          "answer_chars": 2281
+        },
+        {
+          "ok": true,
+          "turn_id": null,
+          "stop_reason": "stop",
+          "input": 40665,
+          "output": 4463,
+          "total": 45128,
+          "cost": 0.104668,
+          "ttft_ms": 11658,
+          "total_ms": 57461,
+          "wall_ms": 61433,
+          "uncached_input": 12,
+          "cache_read": 33264,
+          "cache_write": 7389,
+          "model_calls": 6,
+          "by_model": {
+            "claude-sonnet-5": 6
+          },
+          "tool_calls": 6,
+          "tools": [
+            "web_search",
+            "web_search",
+            "web_fetch",
+            "web_fetch",
+            "web_search",
+            "write_document"
+          ],
+          "searches": 3,
+          "fetches": 2,
+          "citations": {
+            "verified": 1,
+            "unverified": 1
+          },
+          "document": "Demand Letter - Unpaid Invoices ($18,500 - Marketing Agency - Austin TX) - Draft 4.docx",
+          "words": 609,
+          "placeholders": 20,
+          "answer_chars": 2177
+        },
+        {
+          "ok": true,
+          "turn_id": null,
+          "stop_reason": "stop",
+          "input": 68967,
+          "output": 5362,
+          "total": 74329,
+          "cost": 0.140028,
+          "ttft_ms": 6321,
+          "total_ms": 66892,
+          "wall_ms": 71255,
+          "uncached_input": 16,
+          "cache_read": 57686,
+          "cache_write": 11265,
+          "model_calls": 8,
+          "by_model": {
+            "claude-sonnet-5": 8
+          },
+          "tool_calls": 11,
+          "tools": [
+            "web_search",
+            "web_search",
+            "web_fetch",
+            "web_fetch",
+            "web_fetch",
+            "web_fetch",
+            "web_fetch",
+            "web_search",
+            "web_fetch",
+            "web_search",
+            "write_document"
+          ],
+          "searches": 4,
+          "fetches": 6,
+          "citations": {
+            "verified": 3,
+            "unverified": 3
+          },
+          "document": "Demand Letter - Unpaid Invoices ($18,500 - Marketing Agency - Austin TX) - Texas Law v2.docx",
+          "words": 761,
+          "placeholders": 21,
+          "answer_chars": 2716
+        },
+        {
+          "ok": true,
+          "turn_id": null,
+          "stop_reason": "stop",
+          "input": 102078,
+          "output": 6723,
+          "total": 108801,
+          "cost": 0.171303,
+          "ttft_ms": 6286,
+          "total_ms": 87410,
+          "wall_ms": 91378,
+          "uncached_input": 24,
+          "cache_read": 90527,
+          "cache_write": 11527,
+          "model_calls": 12,
+          "by_model": {
+            "claude-sonnet-5": 12
+          },
+          "tool_calls": 13,
+          "tools": [
+            "web_search",
+            "web_search",
+            "web_fetch",
+            "web_fetch",
+            "web_search",
+            "web_fetch",
+            "web_fetch",
+            "web_fetch",
+            "web_search",
+            "web_fetch",
+            "web_search",
+            "web_fetch",
+            "write_document"
+          ],
+          "searches": 5,
+          "fetches": 7,
+          "citations": {
+            "verified": 2,
+            "unverified": 4
+          },
+          "document": "Demand Letter - Unpaid Invoices ($18,500 - Marketing Agency - Austin TX) - New Draft.docx",
+          "words": 659,
+          "placeholders": 19,
+          "answer_chars": 2752
+        }
+      ],
+      "valid": 5,
+      "attempted": 5,
+      "stats": {
+        "input": {
+          "avg": 77490.6,
+          "med": 68967,
+          "min": 40665,
+          "max": 111589
+        },
+        "output": {
+          "avg": 5596,
+          "med": 5674,
+          "min": 4463,
+          "max": 6723
+        },
+        "total": {
+          "avg": 83086.6,
+          "med": 74329,
+          "min": 45128,
+          "max": 117263
+        },
+        "cost": {
+          "avg": 0.1436,
+          "med": 0.1463,
+          "min": 0.104668,
+          "max": 0.171303
+        },
+        "total_ms": {
+          "avg": 73168.8,
+          "med": 68603,
+          "min": 57461,
+          "max": 87410
+        },
+        "ttft_ms": {
+          "avg": 6393.6,
+          "med": 6286,
+          "min": 3684,
+          "max": 11658
+        },
+        "cache_read": {
+          "avg": 66923.4,
+          "med": 57686,
+          "min": 33264,
+          "max": 100779
+        },
+        "cache_write": {
+          "avg": 10548.8,
+          "med": 11265,
+          "min": 7389,
+          "max": 11779
+        },
+        "uncached_input": {
+          "avg": 18.4,
+          "med": 16,
+          "min": 12,
+          "max": 26
+        },
+        "tool_calls": {
+          "avg": 10.2,
+          "med": 11,
+          "min": 6,
+          "max": 13
+        },
+        "searches": {
+          "avg": 3.6,
+          "med": 4,
+          "min": 2,
+          "max": 5
+        },
+        "fetches": {
+          "avg": 5.2,
+          "med": 6,
+          "min": 2,
+          "max": 7
+        },
+        "model_calls": {
+          "avg": 9.2,
+          "med": 8,
+          "min": 6,
+          "max": 13
+        },
+        "words": {
+          "avg": 695.8,
+          "med": 659,
+          "min": 527,
+          "max": 923
+        },
+        "placeholders": {
+          "avg": 20.6,
+          "med": 20,
+          "min": 19,
+          "max": 23
+        }
+      }
+    },
+    "operating": {
+      "cold": {
+        "ok": true,
+        "turn_id": null,
+        "stop_reason": "stop",
+        "input": 31683,
+        "output": 9403,
+        "total": 41086,
+        "cost": 0.19202,
+        "ttft_ms": 14164,
+        "total_ms": 118111,
+        "wall_ms": 123613,
+        "uncached_input": 8,
+        "cache_read": 19661,
+        "cache_write": 12014,
+        "model_calls": 4,
+        "by_model": {
+          "claude-sonnet-5": 4
+        },
+        "tool_calls": 5,
+        "tools": [
+          "read_document",
+          "web_search",
+          "read_document",
+          "web_fetch",
+          "write_document"
+        ],
+        "searches": 1,
+        "fetches": 1,
+        "citations": {
+          "verified": 1
+        },
+        "document": "LLC Operating Agreement - Two-Member Consulting Business (Chicago, Illinois) - Final v4.docx",
+        "words": 2799,
+        "placeholders": 25,
+        "answer_chars": 2668
+      },
+      "runs": [
+        {
+          "ok": true,
+          "turn_id": null,
+          "stop_reason": "stop",
+          "input": 31542,
+          "output": 8310,
+          "total": 39852,
+          "cost": 0.17324,
+          "ttft_ms": 5131,
+          "total_ms": 96449,
+          "wall_ms": 101175,
+          "uncached_input": 8,
+          "cache_read": 20199,
+          "cache_write": 11335,
+          "model_calls": 4,
+          "by_model": {
+            "claude-sonnet-5": 4
+          },
+          "tool_calls": 5,
+          "tools": [
+            "web_search",
+            "web_search",
+            "web_fetch",
+            "web_fetch",
+            "write_document"
+          ],
+          "searches": 2,
+          "fetches": 2,
+          "citations": {
+            "verified": 1,
+            "unverified": 1
+          },
+          "document": "LLC Operating Agreement - Two-Member Consulting Business (Chicago, Illinois) - Draft 6.docx",
+          "words": 2563,
+          "placeholders": 17,
+          "answer_chars": 2871
+        },
+        {
+          "ok": true,
+          "turn_id": null,
+          "stop_reason": "stop",
+          "input": 36391,
+          "output": 9288,
+          "total": 45679,
+          "cost": 0.200004,
+          "ttft_ms": 4439,
+          "total_ms": 108578,
+          "wall_ms": 113476,
+          "uncached_input": 8,
+          "cache_read": 21964,
+          "cache_write": 14419,
+          "model_calls": 4,
+          "by_model": {
+            "claude-sonnet-5": 4
+          },
+          "tool_calls": 5,
+          "tools": [
+            "web_search",
+            "web_search",
+            "web_fetch",
+            "web_fetch",
+            "write_document"
+          ],
+          "searches": 2,
+          "fetches": 2,
+          "citations": {
+            "verified": 2
+          },
+          "document": "LLC Operating Agreement - Two-Member Consulting Business (Chicago, Illinois) - Draft 7.docx",
+          "words": 3355,
+          "placeholders": 21,
+          "answer_chars": 1984
+        },
+        {
+          "ok": true,
+          "turn_id": null,
+          "stop_reason": "stop",
+          "input": 34699,
+          "output": 7843,
+          "total": 42542,
+          "cost": 0.171774,
+          "ttft_ms": 6337,
+          "total_ms": 91671,
+          "wall_ms": 95734,
+          "uncached_input": 8,
+          "cache_read": 22025,
+          "cache_write": 12666,
+          "model_calls": 4,
+          "by_model": {
+            "claude-sonnet-5": 4
+          },
+          "tool_calls": 5,
+          "tools": [
+            "web_search",
+            "web_search",
+            "web_fetch",
+            "web_fetch",
+            "write_document"
+          ],
+          "searches": 2,
+          "fetches": 2,
+          "citations": {
+            "verified": 2
+          },
+          "document": "LLC Operating Agreement - Two-Member Consulting Business (Chicago, Illinois) - Draft 8.docx",
+          "words": 2363,
+          "placeholders": 24,
+          "answer_chars": 2396
+        },
+        {
+          "ok": true,
+          "turn_id": null,
+          "stop_reason": "stop",
+          "input": 33462,
+          "output": 8889,
+          "total": 42351,
+          "cost": 0.186576,
+          "ttft_ms": 2951,
+          "total_ms": 96831,
+          "wall_ms": 101552,
+          "uncached_input": 8,
+          "cache_read": 20938,
+          "cache_write": 12516,
+          "model_calls": 4,
+          "by_model": {
+            "claude-sonnet-5": 4
+          },
+          "tool_calls": 5,
+          "tools": [
+            "web_search",
+            "web_search",
+            "web_fetch",
+            "web_fetch",
+            "write_document"
+          ],
+          "searches": 2,
+          "fetches": 2,
+          "citations": {
+            "verified": 1,
+            "unverified": 1
+          },
+          "document": "LLC Operating Agreement - Two-Member Consulting Business (Chicago, Illinois) - Draft.docx",
+          "words": 2928,
+          "placeholders": 19,
+          "answer_chars": 2698
+        },
+        {
+          "ok": true,
+          "turn_id": null,
+          "stop_reason": "stop",
+          "input": 33246,
+          "output": 8483,
+          "total": 41729,
+          "cost": 0.172343,
+          "ttft_ms": 3289,
+          "total_ms": 98087,
+          "wall_ms": 104227,
+          "uncached_input": 8,
+          "cache_read": 23063,
+          "cache_write": 10175,
+          "model_calls": 4,
+          "by_model": {
+            "claude-sonnet-5": 4
+          },
+          "tool_calls": 5,
+          "tools": [
+            "web_search",
+            "web_search",
+            "web_fetch",
+            "web_fetch",
+            "write_document"
+          ],
+          "searches": 2,
+          "fetches": 2,
+          "citations": {
+            "verified": 1,
+            "unverified": 1
+          },
+          "document": "LLC Operating Agreement - Two-Member Consulting Business (Chicago, Illinois) - New Draft.docx",
+          "words": 2743,
+          "placeholders": 21,
+          "answer_chars": 2388
+        }
+      ],
+      "valid": 5,
+      "attempted": 5,
+      "stats": {
+        "input": {
+          "avg": 33868,
+          "med": 33462,
+          "min": 31542,
+          "max": 36391
+        },
+        "output": {
+          "avg": 8562.6,
+          "med": 8483,
+          "min": 7843,
+          "max": 9288
+        },
+        "total": {
+          "avg": 42430.6,
+          "med": 42351,
+          "min": 39852,
+          "max": 45679
+        },
+        "cost": {
+          "avg": 0.1808,
+          "med": 0.1732,
+          "min": 0.171774,
+          "max": 0.200004
+        },
+        "total_ms": {
+          "avg": 98323.2,
+          "med": 96831,
+          "min": 91671,
+          "max": 108578
+        },
+        "ttft_ms": {
+          "avg": 4429.4,
+          "med": 4439,
+          "min": 2951,
+          "max": 6337
+        },
+        "cache_read": {
+          "avg": 21637.8,
+          "med": 21964,
+          "min": 20199,
+          "max": 23063
+        },
+        "cache_write": {
+          "avg": 12222.2,
+          "med": 12516,
+          "min": 10175,
+          "max": 14419
+        },
+        "uncached_input": {
+          "avg": 8,
+          "med": 8,
+          "min": 8,
+          "max": 8
+        },
+        "tool_calls": {
+          "avg": 5,
+          "med": 5,
+          "min": 5,
+          "max": 5
+        },
+        "searches": {
+          "avg": 2,
+          "med": 2,
+          "min": 2,
+          "max": 2
+        },
+        "fetches": {
+          "avg": 2,
+          "med": 2,
+          "min": 2,
+          "max": 2
+        },
+        "model_calls": {
+          "avg": 4,
+          "med": 4,
+          "min": 4,
+          "max": 4
+        },
+        "words": {
+          "avg": 2790.4,
+          "med": 2743,
+          "min": 2363,
+          "max": 3355
+        },
+        "placeholders": {
+          "avg": 20.4,
+          "med": 21,
+          "min": 17,
+          "max": 24
+        }
+      }
+    }
+  }
+}

@@ -98,8 +98,12 @@ async def run_turn(
         api_stop: str | None = None
 
         try:
+            # Rolling cache breakpoint: everything before the final
+            # message is stable within this turn and gets read from cache
+            # on the next call instead of re-billed in full.
+            send_messages = adapter.format_messages(messages, cache=cache)
             async for ev in adapter.stream(
-                model=model, messages=messages, system=system_fmt,
+                model=model, messages=send_messages, system=system_fmt,
                 tools=tool_defs, max_tokens=max_tokens,
             ):
                 if isinstance(ev, TextDelta):
